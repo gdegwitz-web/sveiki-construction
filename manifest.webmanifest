@@ -1,0 +1,9 @@
+{
+  "name": "A/C Maintenance",
+  "short_name": "A/C Maint.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f6fa",
+  "theme_color": "#0b5cab",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
