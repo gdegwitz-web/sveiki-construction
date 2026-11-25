@@ -123,6 +123,64 @@ function formModal(title, fields, onSubmit, submitLabel = 'Save') {
   return f;
 }
 
+
+// ---------- PWA install (Android, Desktop & iOS) ----------
+let deferredInstallPrompt = null;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function canShowInstall() {
+  return !isStandalone() && (!!deferredInstallPrompt || isIOS());
+}
+
+function updateInstallUI() {
+  const show = canShowInstall();
+  const topBtn = $('#btnInstall');
+  if (topBtn) topBtn.hidden = !show;
+  const loginBtn = $('#btnLoginInstall');
+  if (loginBtn) loginBtn.hidden = !show;
+}
+
+async function triggerInstall() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (outcome === 'accepted') {
+      deferredInstallPrompt = null;
+      toast('Installing app…');
+    }
+    updateInstallUI();
+    return;
+  }
+  if (isIOS()) {
+    const dlg = $('#modal'), f = $('#modalForm');
+    f.innerHTML = `<h2>Install on iPhone / iPad</h2>
+      <p class="muted small" style="margin-top:0">Install Sveiki Construction directly to your home screen for full-screen access:</p>
+      <ol style="padding-left:20px;line-height:1.7;margin:10px 0 16px">
+        <li>Tap the <b>Share</b> button <span class="badge">⬆️</span> at the bottom of Safari.</li>
+        <li>Scroll down and tap <b>Add to Home Screen</b>.</li>
+        <li>Tap <b>Add</b> in the top-right corner.</li>
+      </ol>
+      <div class="actions"><button class="btn pri" value="cancel">Got it</button></div>`;
+    f.onsubmit = () => {};
+    dlg.showModal();
+  }
+}
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  updateInstallUI();
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  updateInstallUI();
+  toast('App installed on your device');
+});
+
+$('#btnInstall') && ($('#btnInstall').onclick = triggerInstall);
+
 // ================= Login / setup =================
 async function renderLogin() {
   $('#topbar').hidden = true;
@@ -157,6 +215,7 @@ async function renderLogin() {
       <div class="field"><label>Password</label><input name="password" type="password" required minlength="${needsSetup ? 6 : 1}" autocomplete="${needsSetup ? 'new-password' : 'current-password'}"></div>
       <button class="btn pri big">${needsSetup ? 'Create developer account' : 'Sign in'}</button>
       ${!needsSetup && FB() ? '<p class="small" style="text-align:center;margin-top:12px"><button type="button" class="link" id="forgot">Forgot your password?</button></p>' : ''}
+      <button type="button" class="btn" id="btnLoginInstall" style="width:100%;margin-top:10px" hidden>⬇ Install app on phone</button>
     </form></div></div>`;
   $('#lf').onsubmit = run(async e => {
     e.preventDefault();
@@ -169,6 +228,8 @@ async function renderLogin() {
     if (!email) throw new Error('Type your email first');
     await api('POST', '/api/password-reset', { email }); toast('If that email exists, a reset link was sent');
   }));
+  $('#btnLoginInstall') && ($('#btnLoginInstall').onclick = triggerInstall);
+  updateInstallUI();
 }
 
 // ================= Navigation =================
@@ -194,6 +255,7 @@ function renderNav() {
   ].filter(Boolean);
   const cur = location.hash.split('?')[0] || '#/';
   $('#nav').innerHTML = links.map(([h, t]) => `<a href="${h}" class="${(cur === h || (h !== '#/' && cur.startsWith(h))) ? 'on' : ''}">${t}</a>`).join('');
+  updateInstallUI();
 }
 $('#btnMenu').onclick = () => {
   formModal('My account', [
