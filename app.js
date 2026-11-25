@@ -65,7 +65,7 @@ async function load(name, force) {
 }
 async function settings(force) { if (!S.settings || force) S.settings = await api('GET', '/api/settings'); return S.settings; }
 function syncBrand(s) {
-  const name = (s?.company_name || '').trim() || 'Sveiki Construction';
+  const name = (s?.company_name || '').trim() || 'Sveiki App';
   document.title = `${name} — A/C Maintenance`;
 }
 // Image sources differ by backend: Firebase returns data URLs, the server serves files
@@ -171,6 +171,7 @@ window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   deferredInstallPrompt = e;
   updateInstallUI();
+  hideSplash();
 });
 
 window.addEventListener('appinstalled', () => {
@@ -191,22 +192,7 @@ async function renderLogin() {
   try { needsSetup = (await api('GET', '/api/setup-status')).needsSetup; }
   catch (e) { app.innerHTML = `<div class="center"><div class="card login"><h1>Cannot connect</h1><p class="muted">${esc(e.message)}</p><button class="btn pri" onclick="location.reload()">Retry</button></div></div>`; return; }
   app.innerHTML = `<div class="center"><div class="card login">
-    <div class="login-brand">
-      <span class="sv-lockup" aria-label="Sveiki Construction">
-        <span class="sv-words"><span class="sv-main">sveiki</span><span class="sv-sub">CONSTRUCTION</span></span>
-        <svg class="sv-bars" viewBox="0 0 80 106" aria-hidden="true">
-          <defs>
-            <linearGradient id="lgBar2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#5B699E"/><stop offset="100%" stop-color="#4274A8"/></linearGradient>
-            <linearGradient id="lgBar4" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#25285E"/><stop offset="100%" stop-color="#4F558C"/></linearGradient>
-          </defs>
-          <polygon points="0,16 80,0 80,14 0,30" fill="#B2DCEB"/>
-          <polygon points="0,35 80,19 80,33 0,49" fill="url(#lgBar2)"/>
-          <polygon points="0,54 80,38 80,52 0,68" fill="#B2DCEB"/>
-          <polygon points="0,73 80,57 80,71 0,87" fill="url(#lgBar4)"/>
-          <polygon points="0,92 80,76 80,90 0,106" fill="#B2DCEB"/>
-        </svg>
-      </span>
-    </div>
+    <img src="logo.png" alt="Sveiki App" class="login-logo">
     <h1>${needsSetup ? 'Initial setup' : 'A/C Maintenance Portal'}</h1>
     ${needsSetup ? '<p class="muted small" style="text-align:center">Create the initial <b>Developer</b> (super-admin) account. Afterwards, add the Master user and field technicians under Users.</p>' : '<p class="muted small" style="text-align:center;margin-bottom:16px">Sign in with your Sveiki Construction account</p>'}
     <form id="lf">
@@ -556,7 +542,7 @@ async function viewReport(id) {
   const showCosts = s.report_show_costs === '1';
   const partsTotal = o.parts.reduce((t, p) => t + p.qty * p.unit_cost, 0);
   const eq = [o.eq_kind, o.eq_brand, o.eq_model, o.eq_btu && o.eq_btu + ' BTU'].filter(Boolean).join(' · ');
-  const logo = logoSrc(s) || 'logo.svg';
+  const logo = logoSrc(s) || 'logo.png';
   const sec = (title, body) => body ? `<section><h3>${title}</h3>${body}</section>` : '';
   app.innerHTML = `
   <div class="row between noprint report-tools">
@@ -963,6 +949,15 @@ async function viewSettings() {
 }
 
 // ================= Boot =================
+const splashStart = Date.now();
+function hideSplash() {
+  const sp = $('#splash');
+  if (!sp || sp.classList.contains('hide')) return;
+  const wait = Math.max(0, 420 - (Date.now() - splashStart));
+  setTimeout(() => { sp.classList.add('hide'); setTimeout(() => sp.remove(), 450); }, wait);
+}
+setTimeout(hideSplash, 4000);
+
 async function boot() {
   if (FB() && !BE) {
     try {
@@ -970,6 +965,7 @@ async function boot() {
       BE = await m.createBackend(CFG.firebase);
     } catch (e) {
       console.error(e);
+      hideSplash();
       app.innerHTML = `<div class="center"><div class="card login"><h1>Configuration needed</h1><p class="muted">Could not start Firebase: ${esc(e.message)}</p><p class="small">Check the Firebase settings in <code>config.js</code>.</p></div></div>`;
       return;
     }
@@ -979,7 +975,8 @@ async function boot() {
   settings().then(syncBrand).catch(() => {});
   if (can('plans', 2) && FB()) api('POST', '/api/plans/run').then(r => r.orders && toast(`${r.orders} preventive work order(s) generated`)).catch(e => console.warn('plans', e));
   if (!location.hash) location.hash = '#/';
-  route();
+  await route();
+  hideSplash();
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 boot();

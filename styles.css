@@ -1,17 +1,17 @@
 :root {
   /* Sveiki Construction Brand Palette */
-  --navy: #1f2859;
-  --navy-deep: #151c42;
+  --navy: #212f5e;
+  --navy-deep: #182349;
   --indigo: #4b548a;
-  --pri: #3b6b9e;
-  --pri-hover: #2d5582;
+  --pri: #325887;
+  --pri-hover: #274770;
   --pri-ink: #ffffff;
-  --sky: #b2dceb;
-  --sky-soft: #eaf5fa;
-  --sky-border: #cde5f0;
+  --sky: #9bc9dd;
+  --sky-soft: #eaf4f8;
+  --sky-border: #c5e0ec;
 
   /* Neutral Surfaces */
-  --bg: #f3f7fb;
+  --bg: #eef4f7;
   --card: #ffffff;
   --ink: #162238;
   --muted: #5b6b82;
@@ -84,7 +84,7 @@ header#topbar {
 }
 
 .brand-pill img {
-  height: 28px;
+  height: 32px;
   width: auto;
   display: block;
 }
@@ -918,4 +918,64 @@ body.auth-mode {
     radial-gradient(circle at 12% 18%, rgba(178, 220, 235, 0.45), transparent 42%),
     radial-gradient(circle at 88% 82%, rgba(59, 107, 158, 0.18), transparent 45%),
     var(--bg);
+}
+
+
+/* ================= Splash Screen (Mobile & Web) ================= */
+#splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, #212f5e 0%, #243968 50%, #325887 100%);
+  color: #ffffff;
+  transition: opacity 0.38s ease, visibility 0.38s ease;
+}
+#splash.hide {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  animation: splashPop 0.55s cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+.splash-char {
+  width: 170px;
+  max-width: 52vw;
+  height: auto;
+  margin-bottom: 10px;
+  filter: drop-shadow(0 10px 24px rgba(10, 18, 42, 0.28));
+}
+.splash-title {
+  font-family: 'Barlow Condensed', 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-size: 62px;
+  font-weight: 800;
+  line-height: 0.9;
+  letter-spacing: -0.015em;
+  color: #f4fafe;
+}
+.splash-sub {
+  font-family: 'Barlow Condensed', 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: #9bc9dd;
+  margin-top: 4px;
+}
+@keyframes splashPop {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.login .login-logo {
+  width: 240px;
+  max-width: 84%;
+  height: auto;
+  display: block;
+  margin: 0 auto 14px;
 }
