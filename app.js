@@ -182,7 +182,195 @@ window.addEventListener('appinstalled', () => {
 
 $('#btnInstall') && ($('#btnInstall').onclick = triggerInstall);
 
+
+// ---------- Biometric Access (Face ID / Touch ID / Fingerprint via WebAuthn) ----------
+const BIO_STORAGE_KEY = 'sv_bio_v1';
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const ub64u = str => Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+async function isBioSupported() {
+  try {
+    return !!(window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable
+      && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+  } catch { return false; }
+}
+
+function getBioData() {
+  try { return JSON.parse(localStorage.getItem(BIO_STORAGE_KEY) || 'null'); }
+  catch { return null; }
+}
+function saveBioData(obj) { localStorage.setItem(BIO_STORAGE_KEY, JSON.stringify(obj)); }
+function clearBioData() {
+  localStorage.removeItem(BIO_STORAGE_KEY);
+  sessionStorage.removeItem('sv_bio_ok');
+}
+
+function openBioKeyDB() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('sveiki-bio-db', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('keys');
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+async function getOrCreateDeviceKey() {
+  const db = await openBioKeyDB();
+  const existing = await new Promise((res, rej) => {
+    const tx = db.transaction('keys', 'readonly');
+    const r = tx.objectStore('keys').get('dev');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  if (existing) return existing;
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  await new Promise((res, rej) => {
+    const tx = db.transaction('keys', 'readwrite');
+    tx.objectStore('keys').put(key, 'dev');
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+  return key;
+}
+
+async function encryptSecret(plainText) {
+  if (!plainText || !window.crypto?.subtle) return null;
+  const key = await getOrCreateDeviceKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plainText));
+  return { iv: b64u(iv), ct: b64u(ct) };
+}
+
+async function decryptSecret(vault) {
+  if (!vault?.iv || !vault?.ct || !window.crypto?.subtle) return null;
+  const key = await getOrCreateDeviceKey();
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ub64u(vault.iv) }, key, ub64u(vault.ct));
+  return new TextDecoder().decode(pt);
+}
+
+async function enrollBiometric(email, name, passwordOpt) {
+  if (!(await isBioSupported())) {
+    throw new Error('Biometric authentication (Face ID / Fingerprint) is not available on this device or browser.');
+  }
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = new TextEncoder().encode(email.toLowerCase());
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge,
+      rp: { name: 'Sveiki App', id: location.hostname },
+      user: { id: userId, name: email.toLowerCase(), displayName: name || email },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'required',
+        residentKey: 'preferred',
+      },
+      timeout: 60000,
+    },
+  });
+  if (!cred) throw new Error('Biometric setup cancelled');
+  const prev = getBioData();
+  const vault = passwordOpt ? await encryptSecret(passwordOpt) : (prev?.email === email.toLowerCase() ? prev.vault : null);
+  saveBioData({
+    credentialId: b64u(cred.rawId),
+    email: email.toLowerCase(),
+    name: name || email,
+    enabledAt: new Date().toISOString(),
+    vault,
+  });
+  if (S.me?.id) sessionStorage.setItem('sv_bio_ok', S.me.id);
+}
+
+async function verifyBiometricAssertion(bio) {
+  if (!bio?.credentialId) throw new Error('Biometric access is not configured on this device');
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      rpId: location.hostname,
+      allowCredentials: [{ type: 'public-key', id: ub64u(bio.credentialId), transports: ['internal'] }],
+      userVerification: 'required',
+      timeout: 60000,
+    },
+  });
+  if (!assertion) throw new Error('Biometric verification failed');
+  return true;
+}
+
+function renderBiometricLock(user) {
+  $('#topbar').hidden = true;
+  document.body.classList.remove('report-mode');
+  document.body.classList.add('auth-mode');
+  clearInterval(tickTimer);
+  hideSplash();
+  const bio = getBioData();
+  app.innerHTML = `<div class="center"><div class="card login bio-card">
+    <img src="logo.png" alt="Sveiki App" class="login-logo">
+    <div class="bio-icon">🔐</div>
+    <h1>Biometric Verification</h1>
+    <p class="muted small" style="margin-bottom:16px">Signed in as <b>${esc(user.name)}</b> (${esc(user.role_name || user.role)}).<br>Verify with Face ID or Fingerprint to enter the app.</p>
+    <div class="auth-actions">
+      <button type="button" class="btn pri big" id="bBioUnlock">🔓 Unlock with Face ID / Fingerprint</button>
+      <button type="button" class="btn" id="bBioSignOut">Sign out / Use password</button>
+    </div>
+  </div></div>`;
+
+  const doUnlock = async () => {
+    const btn = $('#bBioUnlock');
+    if (btn) btn.disabled = true;
+    try {
+      await verifyBiometricAssertion(bio);
+      sessionStorage.setItem('sv_bio_ok', user.id);
+      toast('Welcome back, ' + user.name);
+      await boot();
+    } catch (e) {
+      if (e?.name !== 'NotAllowedError') toast(e.message || 'Biometric verification failed', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  $('#bBioUnlock').onclick = doUnlock;
+  $('#bBioSignOut').onclick = run(async () => {
+    await api('POST', '/api/logout');
+    S.me = null;
+    S.cache = {};
+    S.settings = null;
+    renderLogin();
+  });
+
+  // Trigger native Face ID / Fingerprint prompt automatically on entry
+  setTimeout(doUnlock, 180);
+}
+
+// Re-lock automatically if app is hidden in background for > 2 minutes
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    hiddenAt = Date.now();
+  } else if (hiddenAt && Date.now() - hiddenAt > 120000) {
+    hiddenAt = 0;
+    const bio = getBioData();
+    if (S.me && bio && bio.email === (S.me.email || '').toLowerCase()) {
+      sessionStorage.removeItem('sv_bio_ok');
+      renderBiometricLock(S.me);
+    }
+  }
+});
+
 // ================= Login / setup =================
+async function openResetPasswordModal(prefill = '') {
+  formModal('Reset forgotten password', [
+    { type: 'html', html: '<p class="muted small" style="margin-top:0">Enter the email address associated with your account and we will send you a password reset link.</p>' },
+    { name: 'email', label: 'Account email', type: 'email', required: true, value: prefill, placeholder: 'name@company.com' },
+  ], async d => {
+    const email = (d.email || '').trim();
+    if (!email) throw new Error('Enter your email address');
+    await api('POST', '/api/password-reset', { email });
+    toast('If that email is registered, a password reset link has been sent. Check your inbox and spam folder.');
+  }, 'Send reset link');
+}
+
 async function renderLogin() {
   $('#topbar').hidden = true;
   document.body.classList.remove('report-mode');
@@ -190,32 +378,87 @@ async function renderLogin() {
   clearInterval(tickTimer);
   let needsSetup = false;
   try { needsSetup = (await api('GET', '/api/setup-status')).needsSetup; }
-  catch (e) { app.innerHTML = `<div class="center"><div class="card login"><h1>Cannot connect</h1><p class="muted">${esc(e.message)}</p><button class="btn pri" onclick="location.reload()">Retry</button></div></div>`; return; }
+  catch (e) {
+    hideSplash();
+    app.innerHTML = `<div class="center"><div class="card login"><h1>Cannot connect</h1><p class="muted">${esc(e.message)}</p><button class="btn pri" onclick="location.reload()">Retry</button></div></div>`;
+    return;
+  }
+  const bio = !needsSetup ? getBioData() : null;
+  const bioSupported = !needsSetup && bio ? await isBioSupported() : false;
+
   app.innerHTML = `<div class="center"><div class="card login">
     <img src="logo.png" alt="Sveiki App" class="login-logo">
     <h1>${needsSetup ? 'Initial setup' : 'A/C Maintenance Portal'}</h1>
     ${needsSetup ? '<p class="muted small" style="text-align:center">Create the initial <b>Developer</b> (super-admin) account. Afterwards, add the Master user and field technicians under Users.</p>' : '<p class="muted small" style="text-align:center;margin-bottom:16px">Sign in with your Sveiki Construction account</p>'}
+    ${bioSupported ? `<div style="margin-bottom:14px">
+      <button type="button" class="btn bio big" id="bBioLogin">🔐 Sign in with Face ID / Fingerprint</button>
+      <div class="small muted" style="text-align:center;margin-top:4px">${esc(bio.name)} (${esc(bio.email)})</div>
+    </div>` : ''}
     <form id="lf">
       ${needsSetup ? '<div class="field"><label>Name</label><input name="name" required></div>' : ''}
-      <div class="field"><label>Email</label><input name="email" type="email" required autocomplete="username"></div>
+      <div class="field"><label>Email</label><input name="email" type="email" required autocomplete="username" value="${esc(bio?.email || '')}"></div>
       <div class="field"><label>Password</label><input name="password" type="password" required minlength="${needsSetup ? 6 : 1}" autocomplete="${needsSetup ? 'new-password' : 'current-password'}"></div>
       <button class="btn pri big">${needsSetup ? 'Create developer account' : 'Sign in'}</button>
-      ${!needsSetup && FB() ? '<p class="small" style="text-align:center;margin-top:12px"><button type="button" class="link" id="forgot">Forgot your password?</button></p>' : ''}
-      <button type="button" class="btn" id="btnLoginInstall" style="width:100%;margin-top:10px" hidden>⬇ Install app on phone</button>
-    </form></div></div>`;
+    </form>
+    <div class="auth-actions">
+      ${!needsSetup ? '<button type="button" class="btn" id="forgot" style="width:100%">🔑 Reset forgotten password</button>' : ''}
+      <button type="button" class="btn" id="btnLoginInstall" style="width:100%" hidden>⬇ Install app on phone</button>
+    </div>
+  </div></div>`;
+
   $('#lf').onsubmit = run(async e => {
     e.preventDefault();
-    const b = e.target.querySelector('button.pri'); b.disabled = true;
-    try { await api('POST', needsSetup ? '/api/setup' : '/api/login', Object.fromEntries(new FormData(e.target))); await boot(); }
-    finally { b.disabled = false; }
+    const b = e.target.querySelector('button.pri');
+    b.disabled = true;
+    const creds = Object.fromEntries(new FormData(e.target));
+    try {
+      await api('POST', needsSetup ? '/api/setup' : '/api/login', creds);
+      // If biometric is already configured for this email, refresh encrypted vault with latest password
+      const curBio = getBioData();
+      if (curBio && curBio.email === (creds.email || '').trim().toLowerCase() && creds.password) {
+        curBio.vault = await encryptSecret(creds.password).catch(() => curBio.vault);
+        saveBioData(curBio);
+      } else if (!needsSetup && creds.password && await isBioSupported()) {
+        if (confirm('Enable Face ID / Fingerprint biometric access on this device for future sign-ins?')) {
+          await enrollBiometric(creds.email.trim(), creds.email.trim(), creds.password).catch(err => console.warn('bio enroll skipped', err));
+        }
+      }
+      if (S.me?.id) sessionStorage.setItem('sv_bio_ok', S.me.id);
+      await boot();
+    } finally {
+      b.disabled = false;
+    }
   });
-  $('#forgot') && ($('#forgot').onclick = run(async () => {
-    const email = $('#lf').elements.email.value.trim();
-    if (!email) throw new Error('Type your email first');
-    await api('POST', '/api/password-reset', { email }); toast('If that email exists, a reset link was sent');
+
+  $('#bBioLogin') && ($('#bBioLogin').onclick = run(async e => {
+    const btn = e.target;
+    btn.disabled = true;
+    try {
+      await verifyBiometricAssertion(bio);
+      if (!bio.vault) {
+        toast('Biometric verified — enter your password once to link quick sign-in on this device.');
+        $('#lf').elements.password.focus();
+        return;
+      }
+      const pwd = await decryptSecret(bio.vault);
+      if (!pwd) throw new Error('Could not unlock saved credentials. Sign in with your password once.');
+      await api('POST', '/api/login', { email: bio.email, password: pwd });
+      await boot();
+    } catch (err) {
+      if (err?.name !== 'NotAllowedError') toast(err.message || 'Biometric sign-in failed', true);
+    } finally {
+      btn.disabled = false;
+    }
   }));
+
+  $('#forgot') && ($('#forgot').onclick = () => {
+    const typed = $('#lf').elements.email.value.trim();
+    openResetPasswordModal(typed);
+  });
+
   $('#btnLoginInstall') && ($('#btnLoginInstall').onclick = triggerInstall);
   updateInstallUI();
+  hideSplash();
 }
 
 // ================= Navigation =================
@@ -243,16 +486,61 @@ function renderNav() {
   $('#nav').innerHTML = links.map(([h, t]) => `<a href="${h}" class="${(cur === h || (h !== '#/' && cur.startsWith(h))) ? 'on' : ''}">${t}</a>`).join('');
   updateInstallUI();
 }
-$('#btnMenu').onclick = () => {
+$('#btnMenu').onclick = run(async () => {
+  const bioSupported = await isBioSupported();
+  const bio = getBioData();
+  const bioActive = !!(bio && S.me?.email && bio.email === S.me.email.toLowerCase());
+  const bioHtml = bioSupported ? `<div class="bio-box">
+    <div class="row between">
+      <div>
+        <b>🔐 Biometric Access (Face ID / Fingerprint)</b>
+        <div class="small muted">${bioActive ? 'Active — required every time you open the app on this device.' : 'Disabled — enable to unlock the app with Face ID or Fingerprint.'}</div>
+      </div>
+      <button type="button" class="btn sm ${bioActive ? 'bad' : 'pri'}" id="bToggleBio">${bioActive ? 'Disable' : 'Enable'}</button>
+    </div>
+  </div>` : '';
+
   formModal('My account', [
-    { name: 'current', label: 'Current password', type: 'password' },
-    { name: 'password', label: 'New password (min. 6)', type: 'password' },
-  ], async d => { if (d.password) { await api('POST', '/api/me/password', d); toast('Password updated'); } }, 'Change password');
+    { type: 'html', html: bioHtml },
+    { name: 'current', label: 'Current password', type: 'password', placeholder: 'Required to change password' },
+    { name: 'password', label: 'New password (min. 6)', type: 'password', placeholder: 'Leave blank to keep current' },
+  ], async d => {
+    if (d.password) {
+      await api('POST', '/api/me/password', d);
+      const curBio = getBioData();
+      if (curBio && S.me?.email && curBio.email === S.me.email.toLowerCase()) {
+        curBio.vault = await encryptSecret(d.password).catch(() => curBio.vault);
+        saveBioData(curBio);
+      }
+      toast('Password updated');
+    }
+  }, 'Change password');
+
+  $('#bToggleBio') && ($('#bToggleBio').onclick = run(async () => {
+    if (bioActive) {
+      clearBioData();
+      toast('Biometric access disabled on this device');
+      $('#modal').close();
+    } else {
+      const curPwd = $('#modalForm').elements.current?.value || '';
+      await enrollBiometric(S.me.email, S.me.name, curPwd || null);
+      toast('Biometric access enabled! It will verify on every entry.');
+      $('#modal').close();
+    }
+  }));
+
   const a = $('#modalForm .actions');
   const b = document.createElement('button'); b.type = 'button'; b.className = 'btn bad'; b.textContent = 'Sign out'; b.style.marginRight = 'auto';
-  b.onclick = run(async () => { await api('POST', '/api/logout'); $('#modal').close(); S.me = null; S.cache = {}; S.settings = null; renderLogin(); });
+  b.onclick = run(async () => {
+    await api('POST', '/api/logout');
+    $('#modal').close();
+    S.me = null;
+    S.cache = {};
+    S.settings = null;
+    renderLogin();
+  });
   a.prepend(b);
-};
+});
 
 function parseHash() {
   const [p, q] = (location.hash.slice(1) || '/').split('?');
@@ -853,27 +1141,89 @@ async function viewChecklists() {
 async function viewUsers() {
   const [rows, profiles] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/profiles')]);
   const pname = Object.fromEntries([['developer', 'Developer'], ...profiles.map(p => [p.key, p.name])]);
+  const modName = Object.fromEntries(PERMS.MODULES.map(m => [m.key, m.name]));
   const roleOpts = [...(isDev() ? [['developer', 'Developer (full access, manages permissions)']] : []), ...profiles.map(p => [p.key, p.name])];
-  const form = r => formModal(r ? 'Edit user' : 'New user', [
-    { name: 'name', label: 'Name', required: true, value: r?.name },
-    { name: 'email', label: 'Email (used to sign in)', type: 'email', required: true, value: r?.email, ...(r && FB() ? { help: 'Changing the email here does not change the sign-in email.' } : {}) },
-    { name: 'phone', label: 'Phone', type: 'tel', value: r?.phone },
-    { name: 'role', label: 'Profile', type: 'select', value: r?.role || 'tecnico', options: roleOpts, help: isDev() ? 'Module access for each profile is set in <a href="#/permisos" onclick="document.getElementById(\'modal\').close()">Permissions</a>.' : '' },
-    ...(!r ? [{ name: 'password', label: 'Initial password (min. 6)', type: 'text', required: true }]
-      : FB() ? [{ name: 'send_reset', label: 'Password', type: 'select', value: '0', options: [['0', 'Keep current password'], ['1', 'Email a password-reset link to this user']] }]
-      : [{ name: 'password', label: 'New password (leave blank to keep)', type: 'text' }]),
-    ...(r ? [activeField(r)] : []),
-  ], async d => {
-    if (r) { d.active = +d.active; await api('PUT', '/api/users/' + r.id, d); } else await api('POST', '/api/users', d);
-    toast(d.send_reset === '1' ? 'User saved · reset email sent' : 'User saved'); viewUsers();
-  });
+
+  const form = r => {
+    const canRestrictUser = isDev() && (!r || r.role !== 'developer');
+    const curRestrict = r?.restrict || {};
+    const restrictHtml = canRestrictUser ? `<div class="restrict-box" id="userRestrictWrap" ${r?.role === 'developer' ? 'hidden' : ''}>
+      <label style="margin-bottom:2px">Restrict specific modules for this user (optional)</label>
+      <div class="small muted">Checked modules are blocked for this individual user even if their profile allows them.</div>
+      <div class="restrict-grid">${PERMS.MODULES.map(m => `<label class="restrict-item"><input type="checkbox" data-rmod="${m.key}" ${curRestrict[m.key] ? 'checked' : ''}><span>${esc(m.name)}</span></label>`).join('')}</div>
+    </div>` : '';
+
+    const f = formModal(r ? 'Edit user' : 'New user', [
+      { name: 'name', label: 'Name', required: true, value: r?.name },
+      { name: 'email', label: 'Email (used to sign in)', type: 'email', required: true, value: r?.email, ...(r && FB() ? { help: 'Changing the email here does not change the sign-in email.' } : {}) },
+      { name: 'phone', label: 'Phone', type: 'tel', value: r?.phone },
+      { name: 'role', label: 'Profile', type: 'select', value: r?.role || 'tecnico', options: roleOpts,
+        help: isDev() ? 'Enable/disable modules for each user type in <a href="#/permisos" onclick="document.getElementById(\'modal\').close()">Permissions</a>.' : '',
+        onchange: (e) => { const w = $('#userRestrictWrap'); if (w) w.hidden = e.target.value === 'developer'; } },
+      ...(!r ? [{ name: 'password', label: 'Initial password (min. 6)', type: 'text', required: true }]
+        : FB() ? [{ name: 'send_reset', label: 'Password', type: 'select', value: '0', options: [['0', 'Keep current password'], ['1', 'Email a password-reset link to this user']] }]
+        : [{ name: 'password', label: 'New password (leave blank to keep)', type: 'text' }]),
+      ...(r ? [{ name: 'active', label: 'Account access', type: 'select', value: r.active === 0 || r.active === false ? 0 : 1, options: [[1, 'Active (allowed to sign in)'], [0, 'Restricted / Suspended (block all access)']] }] : []),
+      ...(restrictHtml ? [{ type: 'html', html: restrictHtml }] : []),
+    ], async d => {
+      if (canRestrictUser) {
+        const restrict = {};
+        if (d.role !== 'developer') {
+          f.querySelectorAll('[data-rmod]').forEach(cb => { if (cb.checked) restrict[cb.dataset.rmod] = true; });
+        }
+        d.restrict = restrict;
+      }
+      if (r) { d.active = +d.active; await api('PUT', '/api/users/' + r.id, d); }
+      else {
+        const created = await api('POST', '/api/users', d);
+        if (canRestrictUser && created?.id && Object.keys(d.restrict || {}).length) {
+          await api('PUT', '/api/users/' + created.id, { name: d.name, email: d.email, role: d.role, phone: d.phone, active: 1, restrict: d.restrict });
+        }
+      }
+      toast(d.send_reset === '1' ? 'User saved · reset email sent' : 'User saved');
+      viewUsers();
+    });
+  };
+
   catalogView({
-    title: 'Users', rows, onNew: () => form(), onEdit: form, editable: can('users', 2), canEditRow: r => r.role !== 'developer' || isDev(),
-    cols: [{ h: 'Name', f: r => `<b>${esc(r.name)}</b><div class="small muted">${esc(r.email)}</div>` },
+    title: 'Users',
+    rows,
+    onNew: () => form(),
+    onEdit: form,
+    editable: can('users', 2),
+    canEditRow: r => r.role !== 'developer' || isDev(),
+    cols: [
+      { h: 'Name', f: r => {
+        const rKeys = Object.keys(r.restrict || {}).filter(k => r.restrict[k]);
+        const rText = rKeys.length ? `<div class="small overdue">Restricted: ${rKeys.map(k => esc(modName[k] || k)).join(', ')}</div>` : '';
+        return `<b>${esc(r.name)}</b><div class="small muted">${esc(r.email)}</div>${rText}`;
+      }},
       { h: 'Profile', f: r => `<span class="badge ${r.role === 'developer' ? 'st-en_progreso' : r.role === 'master' ? 'st-asignada' : ''}">${esc(pname[r.role] || r.role)}</span>` },
       { h: 'Phone', cls: 'hide-m', f: r => esc(r.phone || '—') },
-      { h: 'Status', f: r => r.active ? 'Active' : 'Inactive' }],
+      { h: 'Access', f: r => r.active
+        ? '<span class="badge st-completada">Active</span>'
+        : '<span class="badge st-bad">Restricted</span>' },
+      ...(isDev() ? [{ h: '', f: r => (r.role === 'developer' || r.id === S.me.id) ? '' : `<button type="button" class="btn sm ${r.active ? 'bad' : 'ok'}" data-tog-user="${esc(r.id)}">${r.active ? 'Restrict' : 'Restore'}</button>` }] : []),
+    ],
   });
+
+  app.querySelectorAll('[data-tog-user]').forEach(btn => btn.onclick = run(async ev => {
+    ev.stopPropagation();
+    const u = rows.find(x => x.id === btn.dataset.togUser);
+    if (!u) return;
+    const nextActive = u.active ? 0 : 1;
+    if (!nextActive && !confirm(`Restrict all access for "${u.name}"? They will be signed out and blocked immediately.`)) return;
+    await api('PUT', '/api/users/' + u.id, {
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      phone: u.phone || '',
+      active: nextActive,
+      restrict: u.restrict || {},
+    });
+    toast(nextActive ? `Access restored for ${u.name}` : `Access restricted for ${u.name}`);
+    viewUsers();
+  }));
 }
 
 // ================= Developer: profiles & permissions =================
@@ -881,17 +1231,44 @@ async function viewPermissions() {
   const profiles = await api('GET', '/api/profiles');
   const M = PERMS.MODULES;
   const draft = Object.fromEntries(profiles.map(p => [p.key, { ...PERMS.cleanPerms(p.perms) }]));
-  const lvlSel = (p, m) => `<select data-p="${esc(p.key)}" data-m="${m.key}" class="lvl lvl-${draft[p.key][m.key]}">${m.levels.map(l => `<option value="${l}" ${draft[p.key][m.key] === l ? 'selected' : ''}>${PERMS.LEVEL_NAMES[l]}</option>`).join('')}</select>`;
+
+  const lvlCell = (p, m) => {
+    const cur = draft[p.key][m.key];
+    const maxLvl = Math.max(...m.levels);
+    return `<div class="perm-cell">
+      <label class="sv-switch" title="${cur > 0 ? 'Disable module' : 'Enable module'}">
+        <input type="checkbox" data-sw-p="${esc(p.key)}" data-sw-m="${m.key}" data-max="${maxLvl}" ${cur > 0 ? 'checked' : ''}>
+        <span class="sv-slider"></span>
+      </label>
+      <select data-p="${esc(p.key)}" data-m="${m.key}" class="lvl lvl-${cur}">${m.levels.map(l => `<option value="${l}" ${cur === l ? 'selected' : ''}>${PERMS.LEVEL_NAMES[l]}</option>`).join('')}</select>
+    </div>`;
+  };
+
   app.innerHTML = `
-  <div class="row between"><h1>Permissions</h1><div class="row"><button class="btn" id="bNewProf">+ New profile</button><button class="btn pri" id="bSavePerms">Save changes</button></div></div>
-  <p class="muted small" style="margin-top:-6px">Choose what each profile can do in each module. <b>View</b> shows the screen read-only; <b>Full</b> allows creating and editing. Developer always has full access. Changes apply the next time each user opens the app.</p>
-  <div class="card tbl-wrap"><table class="perm"><thead><tr><th>Module</th><th class="pc">Developer<div class="small muted">locked</div></th>
+  <div class="row between"><h1>Modules &amp; Permissions</h1><div class="row"><button class="btn" id="bNewProf">+ New user type</button><button class="btn pri" id="bSavePerms">Save changes</button></div></div>
+  <p class="muted small" style="margin-top:-6px">Enable or disable modules for each user type using the switches or access levels (<b>No access</b> / <b>View</b> / <b>Full</b>). Developer always has unrestricted access. To restrict an individual user, go to <a href="#/usuarios">Users</a>.</p>
+  <div class="card tbl-wrap"><table class="perm"><thead><tr><th>Module</th><th class="pc">Developer<div class="small muted">unrestricted</div></th>
     ${profiles.map(p => `<th class="pc"><button class="link" data-prof="${esc(p.key)}">${esc(p.name)}</button><div class="small muted">${p.users} user(s)${p.builtin ? ' · built-in' : ''}</div></th>`).join('')}</tr></thead>
   <tbody>${M.map(m => `<tr><td><b>${m.name}</b>${m.help ? `<div class="small muted">${m.help}</div>` : ''}</td><td class="pc"><span class="badge st-completada">Full</span></td>
-    ${profiles.map(p => `<td class="pc">${lvlSel(p, m)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    ${profiles.map(p => `<td class="pc">${lvlCell(p, m)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+  const syncControl = (pKey, mKey, val) => {
+    draft[pKey][mKey] = val;
+    const sel = app.querySelector(`select[data-p="${pKey}"][data-m="${mKey}"]`);
+    const sw = app.querySelector(`input[data-sw-p="${pKey}"][data-sw-m="${mKey}"]`);
+    if (sel) { sel.value = String(val); sel.className = 'lvl lvl-' + val; }
+    if (sw) { sw.checked = val > 0; }
+  };
+
   app.querySelectorAll('select.lvl').forEach(sel => sel.onchange = () => {
-    draft[sel.dataset.p][sel.dataset.m] = +sel.value; sel.className = 'lvl lvl-' + sel.value;
+    syncControl(sel.dataset.p, sel.dataset.m, +sel.value);
   });
+
+  app.querySelectorAll('input[data-sw-p]').forEach(sw => sw.onchange = () => {
+    const val = sw.checked ? Number(sw.dataset.max) : 0;
+    syncControl(sw.dataset.swP, sw.dataset.swM, val);
+  });
+
   $('#bSavePerms').onclick = run(async () => {
     const fixes = [];
     for (const p of profiles) {
@@ -899,18 +1276,37 @@ async function viewPermissions() {
       if (d.dashboard && !d.orders) { d.orders = 1; fixes.push(`${p.name}: Dashboard needs "All work orders: View" — enabled it`); }
       if (JSON.stringify(d) !== JSON.stringify(PERMS.cleanPerms(p.perms))) await api('PUT', '/api/profiles/' + p.key, { name: p.name, perms: d });
     }
-    toast(fixes.length ? fixes.join(' · ') : 'Permissions saved'); viewPermissions();
+    toast(fixes.length ? fixes.join(' · ') : 'Module permissions saved');
+    viewPermissions();
   });
-  $('#bNewProf').onclick = () => formModal('New profile', [
+
+  $('#bNewProf').onclick = () => formModal('New user type / profile', [
     { name: 'name', label: 'Profile name', required: true, placeholder: 'E.g. Supervisor, Warehouse, Receptionist' },
-    { name: 'copy', label: 'Start with the permissions of', type: 'select', value: 'tecnico', options: [['', '— Nothing (no access) —'], ...profiles.map(p => [p.key, p.name])] },
-  ], async d => { await api('POST', '/api/profiles', { name: d.name, perms: d.copy ? draft[d.copy] : {} }); toast('Profile created'); viewPermissions(); }, 'Create');
+    { name: 'copy', label: 'Start with the modules of', type: 'select', value: 'tecnico', options: [['', '— None (all modules disabled) —'], ...profiles.map(p => [p.key, p.name])] },
+  ], async d => { await api('POST', '/api/profiles', { name: d.name, perms: d.copy ? draft[d.copy] : {} }); toast('User type created'); viewPermissions(); }, 'Create');
+
   app.querySelectorAll('[data-prof]').forEach(b => b.onclick = () => {
     const p = profiles.find(x => x.key === b.dataset.prof);
-    formModal('Profile: ' + p.name, [
+    formModal('User type: ' + p.name, [
       { name: 'name', label: 'Name', required: true, value: p.name },
-      { type: 'html', html: p.builtin ? '<p class="small muted">Built-in profile: it can be renamed but not deleted.</p>' : p.users ? `<p class="small muted">${p.users} user(s) have this profile. Move them to another profile before deleting it.</p>` : '' },
+      { type: 'html', html: `<div class="row" style="margin-bottom:10px">
+        <button type="button" class="btn sm ok" id="bProfEnableAll">Enable all modules</button>
+        <button type="button" class="btn sm bad" id="bProfDisableAll">Disable all modules</button>
+      </div>` },
+      { type: 'html', html: p.builtin ? '<p class="small muted">Built-in profile: it can be renamed and its modules customized, but not deleted.</p>' : p.users ? `<p class="small muted">${p.users} user(s) have this profile. Move them to another profile before deleting it.</p>` : '' },
     ], async d => { await api('PUT', '/api/profiles/' + p.key, { name: d.name, perms: draft[p.key] }); toast('Profile saved'); viewPermissions(); });
+
+    $('#bProfEnableAll').onclick = () => {
+      M.forEach(m => syncControl(p.key, m.key, Math.max(...m.levels)));
+      toast(`All modules enabled for ${p.name} (click Save changes to apply)`);
+      $('#modal').close();
+    };
+    $('#bProfDisableAll').onclick = () => {
+      M.forEach(m => syncControl(p.key, m.key, 0));
+      toast(`All modules disabled for ${p.name} (click Save changes to apply)`);
+      $('#modal').close();
+    };
+
     if (!p.builtin && !p.users) {
       const del = document.createElement('button'); del.type = 'button'; del.className = 'btn bad'; del.textContent = 'Delete profile'; del.style.marginRight = 'auto';
       del.onclick = run(async () => { if (!confirm(`Delete profile "${p.name}"?`)) return; await api('DELETE', '/api/profiles/' + p.key); $('#modal').close(); toast('Profile deleted'); viewPermissions(); });
@@ -971,6 +1367,10 @@ async function boot() {
     }
   }
   try { S.me = await api('GET', '/api/me'); } catch { if (!S.me) return renderLogin(); }
+  const bio = getBioData();
+  if (bio && S.me?.email && bio.email === S.me.email.toLowerCase() && sessionStorage.getItem('sv_bio_ok') !== S.me.id) {
+    return renderBiometricLock(S.me);
+  }
   S.cache = {}; S.settings = null;
   settings().then(syncBrand).catch(() => {});
   if (can('plans', 2) && FB()) api('POST', '/api/plans/run').then(r => r.orders && toast(`${r.orders} preventive work order(s) generated`)).catch(e => console.warn('plans', e));

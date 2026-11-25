@@ -17,21 +17,45 @@
     { key: 'settings', name: 'Company settings', levels: [0, 2] },
     { key: 'reports', name: 'Client reports & CSV export', levels: [0, 1] },
   ];
+
   const ALL = Object.fromEntries(MODULES.map(m => [m.key, Math.max(...m.levels)]));
+
   const DEFAULT_PROFILES = [
     { key: 'master', name: 'Master', builtin: 1, perms: { ...ALL } },
     { key: 'tecnico', name: 'Technician', builtin: 1, perms: { dashboard: 0, orders: 0, field: 2, plans: 0, clients: 0, units: 0, parts: 0, checklists: 0, users: 0, settings: 0, reports: 1 } },
   ];
+
   const LEVEL_NAMES = { 0: 'No access', 1: 'View', 2: 'Full' };
-  // Effective permissions for a role, given the profiles map { key: { perms } }
-  function permsFor(role, profiles) {
+
+  function cleanRestrict(restrict) {
+    const out = {};
+    if (!restrict || typeof restrict !== 'object') return out;
+    for (const m of MODULES) {
+      if (restrict[m.key] === true || restrict[m.key] === 1 || restrict[m.key] === '1') {
+        out[m.key] = true;
+      }
+    }
+    return out;
+  }
+
+  function permsFor(role, profiles, restrict) {
     if (role === 'developer') return { ...ALL };
     const p = profiles?.[role]?.perms || {};
-    return Object.fromEntries(MODULES.map(m => [m.key, Math.min(Number(p[m.key]) || 0, Math.max(...m.levels))]));
+    const r = cleanRestrict(restrict);
+    return Object.fromEntries(MODULES.map(m => {
+      if (r[m.key]) return [m.key, 0];
+      return [m.key, Math.min(Number(p[m.key]) || 0, Math.max(...m.levels))];
+    }));
   }
+
   function cleanPerms(perms) {
-    return Object.fromEntries(MODULES.map(m => { const v = Number(perms?.[m.key]) || 0; return [m.key, m.levels.includes(v) ? v : 0]; }));
+    return Object.fromEntries(MODULES.map(m => {
+      const v = Number(perms?.[m.key]) || 0;
+      return [m.key, m.levels.includes(v) ? v : 0];
+    }));
   }
-  const P = { MODULES, ALL, DEFAULT_PROFILES, LEVEL_NAMES, permsFor, cleanPerms };
-  if (typeof module !== 'undefined' && module.exports) module.exports = P; else root.PERMS = P;
+
+  const P = { MODULES, ALL, DEFAULT_PROFILES, LEVEL_NAMES, permsFor, cleanPerms, cleanRestrict };
+  if (typeof module !== 'undefined' && module.exports) module.exports = P;
+  else root.PERMS = P;
 })(typeof self !== 'undefined' ? self : this);
