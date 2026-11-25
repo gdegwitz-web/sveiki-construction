@@ -826,6 +826,14 @@ export async function createBackend(config) {
     });
   }
 
+  R('DELETE', '/api/equipment/:id', async p => {
+    need('units', 2);
+    const snap = await getDoc(ref('equipment', p.id));
+    if (!snap.exists()) throw new ApiError('Unit not found', 404);
+    await deleteDoc(ref('equipment', p.id));
+    return { ok: true };
+  });
+
   const cleanItems = items => {
     if (!Array.isArray(items) || !items.length) throw new ApiError('Add at least one checklist item');
     return items.slice(0, 100).map(i => ({
@@ -1033,6 +1041,68 @@ export async function createBackend(config) {
       await updateDoc(ref('orders', o.id), upd);
     }
     return getOrderFull(o.id);
+  });
+
+
+  R('POST', '/api/orders/:id/unit', async (p, b) => {
+    const o = await readOrder(p.id);
+    assertWork(o, { requireArrival: true });
+    if (!o.client_id) throw new ApiError('Order has no client');
+
+    let eqId = blank(b.equipment_id);
+    let created = false;
+
+    if (!eqId) {
+      const location = blank(b.location);
+      if (!location) throw new ApiError('Location is required to register a unit');
+      const kind = blank(b.kind) || 'Split';
+      const brand = blank(b.brand);
+      const model = blank(b.model);
+      const btu = blank(b.btu) != null ? Number(b.btu) : null;
+      const serial = blank(b.serial);
+      const notes = blank(b.notes);
+
+      // Check if an active unit for this client already exists (match by serial if given, or exact location+kind+brand)
+      const existingList = (await list('equipment', { all: true })).filter(e => e.client_id === o.client_id && e.active !== 0 && e.active !== false);
+      const norm = s => String(s || '').trim().toLowerCase();
+      let found = null;
+      if (serial) {
+        found = existingList.find(e => e.serial && norm(e.serial) === norm(serial));
+      }
+      if (!found) {
+        found = existingList.find(e =>
+          norm(e.location) === norm(location)
+          && norm(e.kind) === norm(kind)
+          && norm(e.brand) === norm(brand)
+        );
+      }
+
+      if (found) {
+        eqId = found.id;
+      } else {
+        const r = doc(col('equipment'));
+        await setDoc(r, {
+          client_id: o.client_id,
+          location,
+          kind,
+          brand,
+          model,
+          btu: Number.isFinite(btu) ? btu : null,
+          serial,
+          notes,
+          active: 1,
+          created_by: me.id,
+          created_at: serverTimestamp(),
+        });
+        eqId = r.id;
+        created = true;
+      }
+    }
+
+    const eqFields = await denorm({ equipment_id: eqId });
+    await updateDoc(ref('orders', o.id), { ...eqFields, updated_at: serverTimestamp() });
+    const fullOrder = await getOrderFull(o.id);
+    return { ...fullOrder, unit_created: created };
   });
 
   R('POST', '/api/orders/:id/arrive', async (p, b) => {

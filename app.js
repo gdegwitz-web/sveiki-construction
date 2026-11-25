@@ -804,7 +804,7 @@ function renderOrder(o, partsCat, cfg = S.settings || {}) {
     <div class="grid g2" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
       <div><h3>Client</h3><b>${esc(o.client_name)}</b>${o.client_address ? `<div class="small muted">${esc(o.client_address)} · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${encodeURIComponent(o.client_address)}">Directions</a></div>` : ''}
         ${o.contact_name || o.contact_phone ? `<div class="small">Contact: ${esc(o.contact_name || '')} ${o.contact_phone ? `<a href="tel:${esc(o.contact_phone)}">${esc(o.contact_phone)}</a>` : ''}</div>` : ''}</div>
-      <div><h3>Unit</h3>${o.equipment_id ? `<b>${esc(o.eq_location)}</b><div class="small muted">${esc(eq)}${o.eq_serial ? ' · S/N ' + esc(o.eq_serial) : ''}</div>` : '<span class="muted">No specific unit</span>'}</div>
+      <div><h3>Unit</h3>${o.equipment_id ? `<b>${esc(o.eq_location)}</b><div class="small muted">${esc(eq)}${o.eq_serial ? ' · S/N ' + esc(o.eq_serial) : ''}</div>` : '<span class="muted">No specific unit</span>'}${canWork ? `<div style="margin-top:6px"><button type="button" class="btn sm" id="bPickUnit">${o.equipment_id ? '↻ Change / register unit' : '+ Select or register unit'}</button></div>` : ''}</div>
       <div><h3>Technician</h3>${esc(o.technician_name || 'Unassigned')}${o.scheduled_at ? `<div class="small muted">Scheduled: ${fmtDT(o.scheduled_at)}</div>` : ''}${o.estimated_minutes ? `<div class="small muted">Est. duration: ~${fmtDur(o.estimated_minutes)}</div>` : ''}</div>
     </div>
     ${o.reported_issue ? `<div style="margin-top:12px"><h3>Reported issue / task</h3>${esc(o.reported_issue)}</div>` : ''}
@@ -951,6 +951,57 @@ function renderOrder(o, partsCat, cfg = S.settings || {}) {
     await save(true).catch(() => {});
     rerender(await api('DELETE', `/api/orders/${o.id}/parts/${b.dataset.rmpart}`));
   }));
+  $('#bPickUnit') && ($('#bPickUnit').onclick = run(async () => {
+    const allEq = await load('equipment', true);
+    const clientEq = allEq.filter(e => e.client_id == o.client_id && e.active !== 0 && e.active !== false);
+    const unitOpts = [
+      ['__new__', '+ Register new unit (not in list)'],
+      ...clientEq.map(e => [e.id, [e.location, e.kind, e.brand, e.model, e.btu && e.btu + ' BTU', e.serial && 'S/N ' + e.serial].filter(Boolean).join(' · ')]),
+    ];
+    const startNew = !o.equipment_id || !clientEq.length;
+    const f = formModal('Assign or register A/C unit', [
+      { type: 'html', html: `<p class="small muted" style="margin-top:-6px">Client: <b>${esc(o.client_name)}</b>. Pick an existing unit below or register a new one if it is not yet in the database.</p>` },
+      {
+        name: 'equipment_id',
+        label: 'Registered unit',
+        type: 'select',
+        value: startNew ? '__new__' : o.equipment_id,
+        options: unitOpts,
+      },
+      { name: 'location', label: 'Location (room, apartment, area)', value: '', placeholder: 'E.g. Room 304 / Lobby / Apt 5-B' },
+      { name: 'kind', label: 'Unit type', type: 'select', value: 'Split', options: ['Split', 'Window', 'Cassette', 'Floor/ceiling', 'Fan coil', 'Package', 'Chiller', 'VRF', 'Other'].map(x => [x, x]), half: true },
+      { name: 'brand', label: 'Brand', value: '', placeholder: 'E.g. Carrier, LG, York', half: true },
+      { name: 'model', label: 'Model', value: '', half: true },
+      { name: 'btu', label: 'Capacity (BTU)', type: 'number', value: '', placeholder: 'E.g. 12000', half: true },
+      { name: 'serial', label: 'Serial number', value: '', half: true },
+      { name: 'notes', label: 'Unit notes (optional)', value: '', half: true },
+    ], async d => {
+      const isNewUnit = d.equipment_id === '__new__';
+      if (isNewUnit && !d.location?.trim()) throw new Error('Enter the unit location to register it');
+      await save(true).catch(() => {});
+      const payload = isNewUnit
+        ? { location: d.location, kind: d.kind, brand: d.brand, model: d.model, btu: d.btu, serial: d.serial, notes: d.notes }
+        : { equipment_id: d.equipment_id };
+      const r = await api('POST', `/api/orders/${o.id}/unit`, payload);
+      delete S.cache.equipment;
+      toast(r.unit_created ? 'New unit registered and linked to work order' : 'Unit linked to work order');
+      rerender(r);
+    }, 'Save unit');
+
+    const newFieldNames = ['location', 'kind', 'brand', 'model', 'btu', 'serial', 'notes'];
+    const syncNewFields = () => {
+      const showNew = f.elements.equipment_id.value === '__new__';
+      newFieldNames.forEach(nm => {
+        const el = f.elements[nm];
+        const wrap = el?.closest('.field');
+        if (wrap) wrap.style.display = showNew ? '' : 'none';
+      });
+      if (f.elements.location) f.elements.location.required = showNew;
+    };
+    f.elements.equipment_id.addEventListener('change', syncNewFields);
+    syncNewFields();
+  }));
+
   $('#bEdit') && ($('#bEdit').onclick = run(() => editOrderModal(o)));
 }
 
@@ -1434,6 +1485,17 @@ async function viewEquipment(q) {
   const [clients, all] = await Promise.all([load('clients', true), api('GET', '/api/equipment?all=1')]);
   const cmap = Object.fromEntries(clients.map(c => [c.id, c.name]));
   const rows = q.client_id ? all.filter(e => e.client_id == q.client_id) : all;
+  const editable = can('units', 2);
+
+  const deleteUnit = async (r) => {
+    const label = `${r.location}${cmap[r.client_id] ? ' (' + cmap[r.client_id] + ')' : ''}`;
+    if (!confirm(`Delete unit "${label}" permanently? Existing work orders will keep their historical text, but the unit will be removed from the catalog.`)) return;
+    await api('DELETE', '/api/equipment/' + r.id);
+    delete S.cache.equipment;
+    toast('Unit deleted');
+    viewEquipment(q);
+  };
+
   const form = r => {
     if (!clients.length) throw new Error('Create a client first');
     formModal(r ? 'Edit unit' : 'New unit', [
@@ -1447,17 +1509,31 @@ async function viewEquipment(q) {
       { name: 'notes', label: 'Notes', type: 'textarea', value: r?.notes },
       ...(r ? [activeField(r)] : []),
     ], saveCat('equipment', r, () => viewEquipment(q)));
+    if (r && editable) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn bad';
+      del.textContent = 'Delete unit';
+      del.style.marginRight = 'auto';
+      del.onclick = run(async () => { $('#modal').close(); await deleteUnit(r); });
+      $('#modalForm .actions').prepend(del);
+    }
   };
   catalogView({
-    title: 'A/C units', rows, editable: can('units', 2), onNew: () => form(), onEdit: form,
+    title: 'A/C units', rows, editable, onNew: () => form(), onEdit: form,
     extra: `<div class="card row"><label style="margin:0">Client</label><select id="fc" style="width:auto;min-width:200px"><option value="">All</option>${clients.map(c => `<option value="${esc(c.id)}" ${c.id == q.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><span class="small muted">${rows.length} unit(s)</span></div>`,
     cols: [{ h: 'Location', f: r => `<b>${esc(r.location)}</b><div class="small muted">${esc(cmap[r.client_id] || '')}</div>` },
       { h: 'Unit', f: r => esc([r.kind, r.brand, r.model].filter(Boolean).join(' · ')) },
       { h: 'BTU', cls: 'hide-m', f: r => r.btu ? Number(r.btu).toLocaleString('en-US') : '—' },
       { h: 'Serial no.', cls: 'hide-m', f: r => esc(r.serial || '—') },
-      { h: '', f: r => `<a class="link" href="#/ordenes?equipment_id=${esc(r.id)}" onclick="event.stopPropagation()">History</a>` }],
+      { h: '', f: r => `<div class="row" style="gap:8px;flex-wrap:nowrap"><a class="link" href="#/ordenes?equipment_id=${esc(r.id)}" onclick="event.stopPropagation()">History</a>${editable ? `<button type="button" class="btn sm bad" data-del-unit="${esc(r.id)}" title="Delete unit">Delete</button>` : ''}</div>` }],
   });
   $('#fc').onchange = e => location.hash = '#/equipos' + (e.target.value ? '?client_id=' + e.target.value : '');
+  app.querySelectorAll('[data-del-unit]').forEach(btn => btn.onclick = run(async ev => {
+    ev.stopPropagation();
+    const unit = rows.find(x => x.id === btn.dataset.delUnit);
+    if (unit) await deleteUnit(unit);
+  }));
 }
 
 async function viewParts() {
