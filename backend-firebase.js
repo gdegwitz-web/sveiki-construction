@@ -1171,6 +1171,75 @@ export async function createBackend(config) {
     return { ok: true };
   });
 
+
+  R('POST', '/api/admin/reset-test-data', async (p, b) => {
+    if (me?.impersonating || realMe?.role !== 'developer') {
+      throw new ApiError('Only the Developer account (outside preview mode) can reset test data', 403);
+    }
+    if (b?.confirm !== 'RESET') {
+      throw new ApiError('Confirmation phrase invalid');
+    }
+
+    const counts = { orders: 0, photos: 0, plans: 0, clients: 0, equipment: 0, parts: 0, users: 0, checklists: 0 };
+
+    async function deleteDocsBatched(docRefs) {
+      for (let i = 0; i < docRefs.length; i += 400) {
+        const batch = writeBatch(db);
+        docRefs.slice(i, i + 400).forEach(r => batch.delete(r));
+        await batch.commit();
+      }
+    }
+
+    // 1. Delete all orders and their subcollections (photos, files)
+    const ordersSnap = await getDocs(col('orders'));
+    const subRefs = [];
+    for (const od of ordersSnap.docs) {
+      const [pSnap, fSnap] = await Promise.all([
+        getDocs(col('orders', od.id, 'photos')),
+        getDocs(col('orders', od.id, 'files')),
+      ]);
+      pSnap.docs.forEach(d => subRefs.push(d.ref));
+      fSnap.docs.forEach(d => subRefs.push(d.ref));
+      counts.photos += pSnap.size;
+    }
+    await deleteDocsBatched(subRefs);
+    await deleteDocsBatched(ordersSnap.docs.map(d => d.ref));
+    counts.orders = ordersSnap.size;
+
+    // Reset work order counter to 0 so next order starts at WO-00001
+    await setDoc(ref('counters', 'orders'), { n: 0 });
+
+    // 2. Delete preventive plans, clients, equipment, parts
+    for (const name of ['plans', 'clients', 'equipment', 'parts']) {
+      const snap = await getDocs(col(name));
+      await deleteDocsBatched(snap.docs.map(d => d.ref));
+      counts[name] = snap.size;
+    }
+
+    // 3. Optionally reset checklists back to clean default templates
+    if (b?.reset_checklists) {
+      const ckSnap = await getDocs(col('checklists'));
+      await deleteDocsBatched(ckSnap.docs.map(d => d.ref));
+      counts.checklists = ckSnap.size;
+      const bCk = writeBatch(db);
+      DEFAULT_CHECKLISTS.forEach(c => bCk.set(doc(col('checklists')), { ...c, active: 1, created_at: serverTimestamp() }));
+      await bCk.commit();
+    }
+
+    // 4. Delete all test users in Firestore except the current Developer
+    const usersSnap = await getDocs(col('users'));
+    const otherUsers = usersSnap.docs.filter(d => d.id !== realMe.id);
+    await deleteDocsBatched(otherUsers.map(d => d.ref));
+    counts.users = otherUsers.length;
+
+    // Clear in-memory caches
+    photoCache.clear();
+    photoOrder.clear();
+    sigCache.clear();
+
+    return { ok: true, counts };
+  });
+
   R('GET', '/api/stats', async (p, b, q) => stats(q));
   R('GET', '/api/reports/orders.csv', async (p, b, q) => csv(q));
 

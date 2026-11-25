@@ -1527,6 +1527,36 @@ async function viewSettings() {
   });
   $('#fLogo').onchange = run(async e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('logo', f, f.name); await api('POST', '/api/settings/logo', fd); toast('Logo updated'); viewSettings(); });
   $('#bDelLogo') && ($('#bDelLogo').onclick = run(async () => { if (!confirm('Remove logo?')) return; await api('DELETE', '/api/settings/logo'); viewSettings(); }));
+
+  if (isDev() && !S.me?.impersonating) {
+    const dz = document.createElement('div');
+    dz.className = 'card';
+    dz.style.borderColor = '#f3c4c4';
+    dz.style.background = '#fff9f9';
+    dz.innerHTML = `<h2 style="color:var(--bad)">Developer · Go-Live Data Reset</h2>
+      <p class="small muted" style="margin-top:-4px">Delete all test data created during the trial period before going live: <b>work orders</b> (resets counter back to <code>WO-00001</code>), <b>photos &amp; signatures</b>, <b>preventive plans</b>, <b>clients</b>, <b>A/C units</b>, <b>parts</b>, and <b>all users except your Developer account</b>. Company settings, logo, and permission profiles are preserved.</p>
+      <button type="button" class="btn bad" id="bResetTestData">🗑️ Delete all test data (Go Live)</button>`;
+    app.append(dz);
+
+    $('#bResetTestData').onclick = () => {
+      formModal('⚠️ Delete all test data', [
+        { type: 'html', html: `<div class="alert" style="margin-top:0;margin-bottom:12px">This action is permanent and cannot be undone. All test work orders, photos, signatures, plans, clients, units, parts, and non-developer users will be erased.</div>` },
+        { type: 'html', html: `<label class="restrict-item" style="margin-bottom:12px"><input type="checkbox" name="reset_checklists" value="1"><span>Also reset Checklists back to the 2 default templates</span></label>` },
+        { name: 'confirm', label: 'Type RESET in capital letters to confirm', required: true, placeholder: 'RESET' },
+      ], async d => {
+        if ((d.confirm || '').trim() !== 'RESET') throw new Error('You must type RESET in capital letters to confirm');
+        toast('Deleting test data, please wait…');
+        const res = await api('POST', '/api/admin/reset-test-data', {
+          confirm: 'RESET',
+          reset_checklists: d.reset_checklists === '1',
+        });
+        S.cache = {};
+        const c = res?.counts || {};
+        toast(`Live reset complete! Deleted ${c.orders || 0} orders, ${c.clients || 0} clients, ${c.equipment || 0} units, ${c.parts || 0} parts, ${c.plans || 0} plans, and ${c.users || 0} users.`);
+        viewSettings();
+      }, 'Delete all test data');
+    };
+  }
 }
 
 // ================= Boot =================
