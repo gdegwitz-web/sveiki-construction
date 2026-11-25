@@ -1,7 +1,5 @@
-// Minimal service worker: makes the app installable and fast to open.
-// Only same-origin app files are cached; data (Firebase or /api) always goes to the network.
-const C = 'ac-shell-v4';
-const SHELL = ['./', 'index.html', 'app.js', 'permissions.js', 'styles.css', 'icon.svg', 'manifest.webmanifest'];
+const C = 'ac-shell-v6';
+const SHELL = ['./', 'index.html', 'app.js', 'permissions.js', 'styles.css', 'icon.svg', 'logo.svg', 'manifest.webmanifest'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(C).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {

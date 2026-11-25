@@ -1,6 +1,6 @@
 'use strict';
 // =====================================================================
-//  A/C Maintenance — front end (shared by the Firebase and the server backends)
+//  Sveiki Construction — A/C Maintenance front end (Firebase & server backends)
 //  All data access goes through api(method, url, body). In Firebase mode the calls are
 //  answered by backend-firebase.js; in server mode they go to server.js over HTTP.
 // =====================================================================
@@ -64,6 +64,10 @@ async function load(name, force) {
   return S.cache[name];
 }
 async function settings(force) { if (!S.settings || force) S.settings = await api('GET', '/api/settings'); return S.settings; }
+function syncBrand(s) {
+  const name = (s?.company_name || '').trim() || 'Sveiki Construction';
+  document.title = `${name} — A/C Maintenance`;
+}
 // Image sources differ by backend: Firebase returns data URLs, the server serves files
 const photoSrc = p => p.src || `/api/photos/${p.id}`;
 const sigSrc = o => o.signature_src || `/api/orders/${o.id}/signature?t=${encodeURIComponent(o.signed_at || '')}`;
@@ -123,18 +127,35 @@ function formModal(title, fields, onSubmit, submitLabel = 'Save') {
 async function renderLogin() {
   $('#topbar').hidden = true;
   document.body.classList.remove('report-mode');
+  document.body.classList.add('auth-mode');
   clearInterval(tickTimer);
   let needsSetup = false;
   try { needsSetup = (await api('GET', '/api/setup-status')).needsSetup; }
   catch (e) { app.innerHTML = `<div class="center"><div class="card login"><h1>Cannot connect</h1><p class="muted">${esc(e.message)}</p><button class="btn pri" onclick="location.reload()">Retry</button></div></div>`; return; }
   app.innerHTML = `<div class="center"><div class="card login">
-    <img src="icon.svg" alt=""><h1 style="text-align:center">${needsSetup ? 'Initial setup' : 'A/C Maintenance'}</h1>
-    ${needsSetup ? '<p class="muted small">Create the <b>master</b> user (administrator). You can add technicians afterwards.</p>' : ''}
+    <div class="login-brand">
+      <span class="sv-lockup" aria-label="Sveiki Construction">
+        <span class="sv-words"><span class="sv-main">sveiki</span><span class="sv-sub">CONSTRUCTION</span></span>
+        <svg class="sv-bars" viewBox="0 0 80 106" aria-hidden="true">
+          <defs>
+            <linearGradient id="lgBar2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#5B699E"/><stop offset="100%" stop-color="#4274A8"/></linearGradient>
+            <linearGradient id="lgBar4" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#25285E"/><stop offset="100%" stop-color="#4F558C"/></linearGradient>
+          </defs>
+          <polygon points="0,16 80,0 80,14 0,30" fill="#B2DCEB"/>
+          <polygon points="0,35 80,19 80,33 0,49" fill="url(#lgBar2)"/>
+          <polygon points="0,54 80,38 80,52 0,68" fill="#B2DCEB"/>
+          <polygon points="0,73 80,57 80,71 0,87" fill="url(#lgBar4)"/>
+          <polygon points="0,92 80,76 80,90 0,106" fill="#B2DCEB"/>
+        </svg>
+      </span>
+    </div>
+    <h1>${needsSetup ? 'Initial setup' : 'A/C Maintenance Portal'}</h1>
+    ${needsSetup ? '<p class="muted small" style="text-align:center">Create the initial <b>Developer</b> (super-admin) account. Afterwards, add the Master user and field technicians under Users.</p>' : '<p class="muted small" style="text-align:center;margin-bottom:16px">Sign in with your Sveiki Construction account</p>'}
     <form id="lf">
       ${needsSetup ? '<div class="field"><label>Name</label><input name="name" required></div>' : ''}
       <div class="field"><label>Email</label><input name="email" type="email" required autocomplete="username"></div>
       <div class="field"><label>Password</label><input name="password" type="password" required minlength="${needsSetup ? 6 : 1}" autocomplete="${needsSetup ? 'new-password' : 'current-password'}"></div>
-      <button class="btn pri big">${needsSetup ? 'Create master and sign in' : 'Sign in'}</button>
+      <button class="btn pri big">${needsSetup ? 'Create developer account' : 'Sign in'}</button>
       ${!needsSetup && FB() ? '<p class="small" style="text-align:center;margin-top:12px"><button type="button" class="link" id="forgot">Forgot your password?</button></p>' : ''}
     </form></div></div>`;
   $('#lf').onsubmit = run(async e => {
@@ -192,7 +213,7 @@ function parseHash() {
 async function route() {
   if (!S.me) return;
   clearInterval(tickTimer);
-  document.body.classList.remove('report-mode');
+  document.body.classList.remove('report-mode', 'auth-mode');
   renderNav();
   const { parts, q } = parseHash();
   const [a, b] = parts;
@@ -316,7 +337,7 @@ function renderOrder(o, partsCat) {
     <div class="row between"><h1 style="margin:0">${otCode(o.id)}</h1><div class="row">${badgeSt(o.status)}${badgePr(o.priority)}<span class="badge">${TYPE[o.type]}</span>${o.plan_id ? '<span class="badge">Plan</span>' : ''}</div></div>
     ${isOverdue(o) ? `<div class="alert">⚠ Overdue — was scheduled for ${fmtDT(o.scheduled_at)}</div>` : ''}
     <div class="grid g2" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-      <div><h3>Client</h3><b>${esc(o.client_name)}</b><div class="small muted">${esc(o.client_address || '')}</div>
+      <div><h3>Client</h3><b>${esc(o.client_name)}</b>${o.client_address ? `<div class="small muted">${esc(o.client_address)} · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${encodeURIComponent(o.client_address)}">Directions</a></div>` : ''}
         ${o.contact_name || o.contact_phone ? `<div class="small">Contact: ${esc(o.contact_name || '')} ${o.contact_phone ? `<a href="tel:${esc(o.contact_phone)}">${esc(o.contact_phone)}</a>` : ''}</div>` : ''}</div>
       <div><h3>Unit</h3>${o.equipment_id ? `<b>${esc(o.eq_location)}</b><div class="small muted">${esc(eq)}${o.eq_serial ? ' · S/N ' + esc(o.eq_serial) : ''}</div>` : '<span class="muted">No specific unit</span>'}</div>
       <div><h3>Technician</h3>${esc(o.technician_name || 'Unassigned')}${o.scheduled_at ? `<div class="small muted">Scheduled: ${fmtDT(o.scheduled_at)}</div>` : ''}</div>
@@ -451,8 +472,9 @@ function renderOrder(o, partsCat) {
     const lb = document.createElement('div'); lb.className = 'lightbox'; lb.innerHTML = `<img src="${img.src}">`; lb.onclick = () => lb.remove(); document.body.append(lb);
   });
   $('#bAddPart') && ($('#bAddPart').onclick = run(async () => {
-    const part_id = $('#fPart').value, qty = $('#fQty').value;
+    const part_id = $('#fPart').value, qty = Number($('#fQty').value);
     if (!part_id) throw new Error('Select a part');
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error('Enter a valid quantity greater than 0');
     await save(true).catch(() => {});
     rerender(await api('POST', `/api/orders/${o.id}/parts`, { part_id, qty }));
     toast('Part added');
@@ -472,7 +494,7 @@ async function viewReport(id) {
   const showCosts = s.report_show_costs === '1';
   const partsTotal = o.parts.reduce((t, p) => t + p.qty * p.unit_cost, 0);
   const eq = [o.eq_kind, o.eq_brand, o.eq_model, o.eq_btu && o.eq_btu + ' BTU'].filter(Boolean).join(' · ');
-  const logo = logoSrc(s);
+  const logo = logoSrc(s) || 'logo.svg';
   const sec = (title, body) => body ? `<section><h3>${title}</h3>${body}</section>` : '';
   app.innerHTML = `
   <div class="row between noprint report-tools">
@@ -587,12 +609,16 @@ async function viewOrders(q) {
   app.innerHTML = `
   <div class="row between"><h1>Work orders</h1><div class="row">${can('reports') ? '<button class="btn" id="bCsv">⬇ Export CSV</button>' : ''}${fullOrders() ? '<button class="btn pri" id="bNew">+ New work order</button>' : ''}</div></div>
   <form class="card row" id="flt">
-    <select name="status" style="flex:1;min-width:140px">${opt([['', 'All statuses'], ['pendiente,asignada,en_progreso', 'Open'], ...Object.entries(ST)], q.status)}</select>
+    <input type="search" name="q" value="${esc(q.q || '')}" placeholder="Search WO, client, unit, issue…" style="flex:2;min-width:180px">
+    <select name="status" style="flex:1;min-width:130px">${opt([['', 'All statuses'], ['pendiente,asignada,en_progreso', 'Open'], ...Object.entries(ST)], q.status)}</select>
+    <select name="type" style="flex:1;min-width:120px">${opt([['', 'All types'], ['correctivo', 'Corrective'], ['preventivo', 'Preventive']], q.type)}</select>
+    <select name="priority" style="flex:1;min-width:120px">${opt([['', 'All priorities'], ...Object.entries(PR)], q.priority)}</select>
     <select name="technician_id" style="flex:1;min-width:140px">${opt([['', 'All technicians'], ...users.map(u => [u.id, u.name])], q.technician_id)}</select>
     <select name="client_id" style="flex:1;min-width:140px">${opt([['', 'All clients'], ...clients.map(c => [c.id, c.name])], q.client_id)}</select>
     <input type="date" name="from" value="${q.from || ''}" style="width:auto" title="From"><input type="date" name="to" value="${q.to || ''}" style="width:auto" title="To">
     ${q.equipment_id ? `<input type="hidden" name="equipment_id" value="${esc(q.equipment_id)}"><span class="badge">Filtered by unit</span>` : ''}
-    <button class="btn">Filter</button>
+    <button class="btn pri">Filter</button>
+    ${qs ? '<a class="btn" href="#/ordenes">Clear</a>' : ''}
   </form>
   <div class="card tbl-wrap">${list.length ? `<table><thead><tr><th>WO</th><th>Client / unit</th><th>Technician</th><th>Status</th><th class="hide-m">Scheduled / arrival</th><th class="hide-m">On site</th><th class="hide-m">Photos</th><th class="hide-m">Parts</th></tr></thead><tbody>
     ${list.map(o => `<tr class="click" data-id="${o.id}"><td><b>${otCode(o.id)}</b><div class="small muted">${fmtD(o.created_at)}</div></td>
@@ -869,7 +895,7 @@ async function viewSettings() {
     <div class="row">${logo ? `<img src="${esc(logo)}" class="logo-prev" alt="">` : '<span class="muted">No logo uploaded.</span>'}</div>
     <div class="row" style="margin-top:10px"><label class="btn camera-btn" style="margin:0">Upload logo (PNG/JPG/SVG)<input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" id="fLogo"></label>
     ${logo ? '<button class="btn bad" id="bDelLogo">Remove</button>' : ''}</div></div>`;
-  $('#sf').onsubmit = run(async e => { e.preventDefault(); await api('PUT', '/api/settings', Object.fromEntries(new FormData(e.target))); toast('Settings saved'); S.settings = null; });
+  $('#sf').onsubmit = run(async e => { e.preventDefault(); const data = Object.fromEntries(new FormData(e.target)); await api('PUT', '/api/settings', data); toast('Settings saved'); S.settings = null; syncBrand(data); });
   $('#fLogo').onchange = run(async e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('logo', f, f.name); await api('POST', '/api/settings/logo', fd); toast('Logo updated'); viewSettings(); });
   $('#bDelLogo') && ($('#bDelLogo').onclick = run(async () => { if (!confirm('Remove logo?')) return; await api('DELETE', '/api/settings/logo'); viewSettings(); }));
 }
@@ -888,6 +914,7 @@ async function boot() {
   }
   try { S.me = await api('GET', '/api/me'); } catch { if (!S.me) return renderLogin(); }
   S.cache = {}; S.settings = null;
+  settings().then(syncBrand).catch(() => {});
   if (can('plans', 2) && FB()) api('POST', '/api/plans/run').then(r => r.orders && toast(`${r.orders} preventive work order(s) generated`)).catch(e => console.warn('plans', e));
   if (!location.hash) location.hash = '#/';
   route();

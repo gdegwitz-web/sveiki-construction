@@ -3,8 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b5cab">
-<title>A/C Maintenance</title>
+<meta name="theme-color" content="#1f2859">
+<title>Sveiki Construction — A/C Maintenance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
@@ -12,7 +15,27 @@
 </head>
 <body>
 <header id="topbar" hidden>
-  <div class="brand"><img src="icon.svg" alt=""><span>A/C Maintenance</span></div>
+  <a class="brand" href="#/">
+    <span class="brand-pill">
+      <span class="sv-lockup sm" aria-label="Sveiki Construction">
+        <span class="sv-words">
+          <span class="sv-main" id="brandName">sveiki</span>
+          <span class="sv-sub">CONSTRUCTION</span>
+        </span>
+        <svg class="sv-bars" viewBox="0 0 80 106" aria-hidden="true">
+          <defs>
+            <linearGradient id="tbBar2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#5B699E"/><stop offset="100%" stop-color="#4274A8"/></linearGradient>
+            <linearGradient id="tbBar4" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#25285E"/><stop offset="100%" stop-color="#4F558C"/></linearGradient>
+          </defs>
+          <polygon points="0,16 80,0 80,14 0,30" fill="#B2DCEB"/>
+          <polygon points="0,35 80,19 80,33 0,49" fill="url(#tbBar2)"/>
+          <polygon points="0,54 80,38 80,52 0,68" fill="#B2DCEB"/>
+          <polygon points="0,73 80,57 80,71 0,87" fill="url(#tbBar4)"/>
+          <polygon points="0,92 80,76 80,90 0,106" fill="#B2DCEB"/>
+        </svg>
+      </span>
+    </span>
+  </a>
   <nav id="nav"></nav>
   <div class="who"><span id="whoName"></span><button class="link" id="btnMenu">Account</button></div>
 </header>
