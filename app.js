@@ -749,8 +749,8 @@ function signaturePad(canvas) {
 
 // ================= Work order detail (technician and master) =================
 async function viewOrder(id) {
-  const [o, parts] = await Promise.all([api('GET', '/api/orders/' + id), load('parts', true)]);
-  renderOrder(o, parts);
+  const [o, parts, cfg] = await Promise.all([api('GET', '/api/orders/' + id), load('parts', true), settings(true)]);
+  renderOrder(o, parts, cfg);
 }
 function checklistHtml(items, editable) {
   if (!items?.length) return '';
@@ -768,7 +768,7 @@ function checklistHtml(items, editable) {
         : `<div class="ck txt ro"><span>${esc(it.label)}</span><div>${esc(it.value || '—')}</div></div>`;
     }).join('')}</div></div>`;
 }
-function renderOrder(o, partsCat) {
+function renderOrder(o, partsCat, cfg = S.settings || {}) {
   clearInterval(tickTimer);
   const closed = ['completada', 'cancelada'].includes(o.status);
   const arrived = !!o.arrival_at;
@@ -777,10 +777,21 @@ function renderOrder(o, partsCat) {
   const canWork = full ? o.status !== 'cancelada' : (mine && arrived && !closed);
   const canArrive = !arrived && !closed && (full || mine);
   const showCosts = can('orders') && can('parts');
+  // Master/full-order users always see all sections; field technicians follow the Master toggles
+  const fOn = k => full || (cfg?.[k] ?? '1') !== '0';
+  const showDiagSec = fOn('field_show_diagnosis');
+  const showPhotosSec = fOn('field_show_photos');
+  const showChecklistSec = fOn('field_show_checklist');
+  const showPartsSec = fOn('field_show_parts');
+  const showWorkSec = fOn('field_show_work_done');
+  const showRecSec = fOn('field_show_recommendations');
+  const showRecvSec = fOn('field_show_received_by');
+  const showSigSec = fOn('field_show_signature');
+  const showSignoffCard = showWorkSec || showRecSec || showRecvSec || showSigSec;
   const eq = [o.eq_kind, o.eq_brand, o.eq_model, o.eq_btu && o.eq_btu + ' BTU'].filter(Boolean).join(' · ');
   const respMin = arrived ? Math.max(0, mins(o.scheduled_at || o.created_at, o.arrival_at)) : null;
   const partsTotal = o.parts.reduce((s, p) => s + p.qty * p.unit_cost, 0);
-  const showSigPad = canWork && !closed;
+  const showSigPad = canWork && !closed && showSigSec;
 
   app.innerHTML = `
   <div class="row between noprint" style="margin-bottom:8px">
@@ -810,20 +821,20 @@ function renderOrder(o, partsCat) {
     ${canArrive ? `<div style="margin-top:14px"><button class="btn pri big" id="bArrive">📍 Record arrival</button><div class="small muted" style="margin-top:6px;text-align:center">Server time${location.protocol === 'https:' || location.hostname === 'localhost' ? ' and your GPS location' : ''} will be saved.</div></div>` : ''}
   </div>
 
-  ${!arrived && !full ? '<div class="card empty">Record your arrival to add diagnosis, checklist, photos and parts.</div>' : `
-  <div class="card">
-    <h2>Diagnosis</h2>
-    ${canWork ? `<textarea id="fDiag" placeholder="What did you find? E.g. compressor won't start, swollen capacitor, low refrigerant pressure…">${esc(o.diagnosis || '')}</textarea>` : `<div>${esc(o.diagnosis || '—')}</div>`}
-    <div class="row between" style="margin:14px 0 8px"><h3 style="margin:0">Photos (${o.photos.length})</h3>
+  ${!arrived && !full ? '<div class="card empty">Record your arrival to start working on this order.</div>' : `
+  ${(showDiagSec || showPhotosSec) ? `<div class="card">
+    ${showDiagSec ? `<h2>Diagnosis</h2>
+    ${canWork ? `<textarea id="fDiag" placeholder="What did you find? E.g. compressor won't start, swollen capacitor, low refrigerant pressure…">${esc(o.diagnosis || '')}</textarea>` : `<div>${esc(o.diagnosis || '—')}</div>`}` : ''}
+    ${showPhotosSec ? `<div class="row between" style="margin:${showDiagSec ? '14px' : '0'} 0 8px"><h3 style="margin:0">Photos (${o.photos.length})</h3>
       ${canWork ? `<div class="row"><select id="fKind" style="width:auto"><option value="diagnostico">Diagnosis</option><option value="antes">Before</option><option value="despues">After</option></select>
       <label class="btn pri camera-btn" style="margin:0;color:#fff">📷 Take photo<input type="file" accept="image/*" capture="environment" id="fPhoto" multiple></label></div>` : ''}
     </div>
-    <div class="photos">${o.photos.map(p => `<div class="photo"><img loading="lazy" src="${esc(photoSrc(p))}" alt=""><span class="tag">${PHOTO_KIND[p.kind] || p.kind}</span>${canWork ? `<button class="del noprint" data-del="${esc(p.id)}" title="Delete">×</button>` : ''}</div>`).join('') || '<div class="muted small">No photos.</div>'}</div>
-  </div>
+    <div class="photos">${o.photos.map(p => `<div class="photo"><img loading="lazy" src="${esc(photoSrc(p))}" alt=""><span class="tag">${PHOTO_KIND[p.kind] || p.kind}</span>${canWork ? `<button class="del noprint" data-del="${esc(p.id)}" title="Delete">×</button>` : ''}</div>`).join('') || '<div class="muted small">No photos.</div>'}</div>` : ''}
+  </div>` : ''}
 
-  ${checklistHtml(o.checklist, canWork)}
+  ${showChecklistSec ? checklistHtml(o.checklist, canWork) : ''}
 
-  <div class="card">
+  ${showPartsSec ? `<div class="card">
     <h2>Parts used</h2>
     ${o.parts.length ? `<div class="tbl-wrap"><table><thead><tr><th>Part</th><th>Qty</th>${showCosts ? '<th>Cost</th>' : ''}<th></th></tr></thead><tbody>
       ${o.parts.map(p => `<tr><td>${esc(p.name)}${p.code ? ` <span class="small muted">${esc(p.code)}</span>` : ''}</td><td>${p.qty} ${esc(p.unit)}</td>${showCosts ? `<td>${money(p.qty * p.unit_cost)}</td>` : ''}<td>${canWork ? `<button class="btn sm bad noprint" data-rmpart="${esc(p.id)}">Remove</button>` : ''}</td></tr>`).join('')}
@@ -833,22 +844,22 @@ function renderOrder(o, partsCat) {
       <select id="fPart" style="flex:3;min-width:180px"><option value="">— Select part —</option>${partsCat.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.code ? ' (' + esc(p.code) + ')' : ''} · stock ${p.stock} ${esc(p.unit)}</option>`).join('')}</select>
       <input id="fQty" type="number" min="0.01" step="0.01" value="1" style="flex:1;min-width:70px">
       <button class="btn" id="bAddPart">Add</button></div>` : ''}
-  </div>
+  </div>` : ''}
 
-  <div class="card">
-    <h2>Work performed and sign-off</h2>
+  ${showSignoffCard ? `<div class="card">
+    <h2>${showSigSec || showRecvSec ? 'Work performed and sign-off' : 'Work performed'}</h2>
     ${canWork ? `
-      <div class="field"><label>Work performed</label><textarea id="fWork" placeholder="E.g. replaced 35/5 µF capacitor, cleaned coil, recharged R410A…">${esc(o.work_done || '')}</textarea></div>
-      <div class="field"><label>Recommendations to client</label><textarea id="fRec" style="min-height:60px">${esc(o.recommendations || '')}</textarea></div>
-      <div class="field"><label>Received by (on-site contact signing off)</label><input id="fRecv" value="${esc(o.received_by || '')}"></div>`
-    : `<div class="grid g2"><div><h3>Work performed</h3>${esc(o.work_done || '—')}</div><div><h3>Recommendations</h3>${esc(o.recommendations || '—')}</div></div><div style="margin-top:10px"><h3>Received by</h3>${esc(o.received_by || '—')}</div>`}
-    <div style="margin-top:12px"><h3>Client signature</h3>
+      ${showWorkSec ? `<div class="field"><label>Work performed</label><textarea id="fWork" placeholder="E.g. replaced 35/5 µF capacitor, cleaned coil, recharged R410A…">${esc(o.work_done || '')}</textarea></div>` : ''}
+      ${showRecSec ? `<div class="field"><label>Recommendations to client</label><textarea id="fRec" style="min-height:60px">${esc(o.recommendations || '')}</textarea></div>` : ''}
+      ${showRecvSec ? `<div class="field"><label>Received by (on-site contact signing off)</label><input id="fRecv" value="${esc(o.received_by || '')}"></div>` : ''}`
+    : `<div class="grid g2">${showWorkSec ? `<div><h3>Work performed</h3>${esc(o.work_done || '—')}</div>` : ''}${showRecSec ? `<div><h3>Recommendations</h3>${esc(o.recommendations || '—')}</div>` : ''}</div>${showRecvSec ? `<div style="margin-top:10px"><h3>Received by</h3>${esc(o.received_by || '—')}</div>` : ''}`}
+    ${showSigSec ? `<div style="margin-top:12px"><h3>Client signature</h3>
       ${o.has_signature ? `<div class="sigview" id="sigView"><img src="${esc(sigSrc(o))}" alt="Signature"><div class="small muted">Signed ${fmtDT(o.signed_at)}</div>${showSigPad ? '<button class="btn sm noprint" id="bResign">Sign again</button>' : ''}</div>` : ''}
       ${showSigPad ? `<div id="sigWrap" ${o.has_signature ? 'hidden' : ''}><canvas id="sigPad" class="sigpad"></canvas>
         <div class="row between small muted" style="margin-top:4px"><span>Ask the client to sign above with a finger</span><button type="button" class="link" id="bSigClear">Clear</button></div></div>` : ''}
       ${!o.has_signature && !showSigPad ? '<div class="muted small">Not signed.</div>' : ''}
-    </div>
-  </div>`}
+    </div>` : ''}
+  </div>` : ''}`}
 
   ${canWork && !closed && arrived ? `<div class="stickybar noprint"><div class="inner row"><button class="btn" id="bSave" style="flex:1">Save</button><button class="btn ok" id="bDepart" style="flex:2">✅ Record departure</button></div></div>` : ''}
   ${full && canWork && (closed || !arrived) ? `<div class="stickybar noprint"><div class="inner"><button class="btn pri big" id="bSave">Save changes</button></div></div>` : ''}
@@ -881,7 +892,7 @@ function renderOrder(o, partsCat) {
   ['#fDiag', '#fWork', '#fRec', '#fRecv'].forEach(s => { const el = $(s); if (el) el.addEventListener('change', run(() => save(true))); });
   app.querySelectorAll('[data-ci]').forEach(el => el.addEventListener('change', run(() => save(true))));
 
-  const rerender = async (fresh) => renderOrder(fresh, await load('parts', true));
+  const rerender = async (fresh) => renderOrder(fresh, await load('parts', true), await settings());
 
   $('#bArrive') && ($('#bArrive').onclick = run(async e => {
     e.target.disabled = true; e.target.textContent = 'Recording…';
@@ -891,12 +902,14 @@ function renderOrder(o, partsCat) {
   $('#bSave') && ($('#bSave').onclick = run(async () => { await save(true); const r = (await uploadSignature()) || await api('GET', '/api/orders/' + o.id); toast('Saved'); rerender(r); }));
   $('#bDepart') && ($('#bDepart').onclick = run(async e => {
     const v = textVals();
-    if (!v.diagnosis?.trim()) { $('#fDiag').focus(); throw new Error('Enter the diagnosis before closing'); }
-    const missing = (o.checklist || []).filter((it, i) => it.kind === 'check' && !v.checklist[i].value).length;
-    if (missing && !confirm(`${missing} checklist item(s) not checked. Close anyway?`)) return;
-    if (!o.photos.length && !confirm('No photos taken. Close the work order anyway?')) return;
+    if (showDiagSec && !v.diagnosis?.trim()) { $('#fDiag')?.focus(); throw new Error('Enter the diagnosis before closing'); }
+    if (showChecklistSec && o.checklist && v.checklist) {
+      const missing = o.checklist.filter((it, i) => it.kind === 'check' && !v.checklist[i]?.value).length;
+      if (missing && !confirm(`${missing} checklist item(s) not checked. Close anyway?`)) return;
+    }
+    if (showPhotosSec && !o.photos.length && !confirm('No photos taken. Close the work order anyway?')) return;
     const signedNow = pad?.hasInk();
-    if (!o.has_signature && !signedNow && !confirm('The client has not signed. Close anyway?')) return;
+    if (showSigSec && !o.has_signature && !signedNow && !confirm('The client has not signed. Close anyway?')) return;
     if (!confirm('Record departure and close this work order? You will not be able to edit it afterwards.')) return;
     e.target.disabled = true;
     try {
@@ -1445,6 +1458,17 @@ async function viewPermissions() {
 async function viewSettings() {
   const s = await settings(true);
   const logo = logoSrc(s);
+  const fieldSections = [
+    ['field_show_diagnosis', 'Diagnosis', 'Text field to describe what was found on site (required before closing when enabled)'],
+    ['field_show_photos', 'Photos (Diagnosis / Before / After)', 'Camera upload and photo gallery on work orders'],
+    ['field_show_checklist', 'Checklist & readings', 'Inspection checklist items and measurements'],
+    ['field_show_parts', 'Parts & materials used', 'Select parts from inventory and deduct stock'],
+    ['field_show_work_done', 'Work performed', 'Summary of repair or maintenance actions completed'],
+    ['field_show_recommendations', 'Recommendations to client', 'Follow-up notes and recommendations'],
+    ['field_show_received_by', 'Client sign-off contact name', '"Received by" on-site contact name field'],
+    ['field_show_signature', 'Client signature pad', 'Touchscreen signature pad for client approval'],
+  ];
+
   app.innerHTML = `<h1>Settings</h1>
   <form class="card" id="sf">
     <h2>Company (shown on client reports)</h2>
@@ -1459,13 +1483,48 @@ async function viewSettings() {
       <div class="field"><label>Show part costs on client reports</label><select name="report_show_costs"><option value="0" ${s.report_show_costs !== '1' ? 'selected' : ''}>No</option><option value="1" ${s.report_show_costs === '1' ? 'selected' : ''}>Yes</option></select></div>
       <div class="field"><label>Create preventive orders this many days before due</label><input name="preventive_lead_days" type="number" min="0" max="60" value="${esc(s.preventive_lead_days)}"></div>
     </div>
+
+    <hr style="border:0;border-top:1px solid var(--line);margin:18px 0">
+    <h2>Technician Field Work Sections</h2>
+    <p class="muted small" style="margin-top:-6px">Choose which sections field technicians see and complete on their work orders. Arrival and departure time logs are always active.</p>
+    <div class="tbl-wrap" style="margin-bottom:14px">
+      <table>
+        <thead><tr><th>Field section</th><th>Description</th><th style="text-align:center;width:110px">Enabled</th></tr></thead>
+        <tbody>
+          ${fieldSections.map(([key, title, desc]) => {
+            const on = (s[key] ?? '1') !== '0';
+            return `<tr>
+              <td><b>${esc(title)}</b></td>
+              <td class="small muted">${esc(desc)}</td>
+              <td style="text-align:center">
+                <label class="sv-switch" title="${on ? 'Disable section' : 'Enable section'}">
+                  <input type="checkbox" data-fsec="${key}" ${on ? 'checked' : ''}>
+                  <span class="sv-slider"></span>
+                </label>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+
     <button class="btn pri">Save settings</button>
   </form>
   <div class="card"><h2>Logo</h2>
     <div class="row">${logo ? `<img src="${esc(logo)}" class="logo-prev" alt="">` : '<span class="muted">No logo uploaded.</span>'}</div>
     <div class="row" style="margin-top:10px"><label class="btn camera-btn" style="margin:0">Upload logo (PNG/JPG/SVG)<input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" id="fLogo"></label>
     ${logo ? '<button class="btn bad" id="bDelLogo">Remove</button>' : ''}</div></div>`;
-  $('#sf').onsubmit = run(async e => { e.preventDefault(); const data = Object.fromEntries(new FormData(e.target)); await api('PUT', '/api/settings', data); toast('Settings saved'); S.settings = null; syncBrand(data); });
+  $('#sf').onsubmit = run(async e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    $('#sf').querySelectorAll('[data-fsec]').forEach(cb => {
+      data[cb.dataset.fsec] = cb.checked ? '1' : '0';
+    });
+    await api('PUT', '/api/settings', data);
+    toast('Settings saved');
+    S.settings = null;
+    syncBrand(data);
+  });
   $('#fLogo').onchange = run(async e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('logo', f, f.name); await api('POST', '/api/settings/logo', fd); toast('Logo updated'); viewSettings(); });
   $('#bDelLogo') && ($('#bDelLogo').onclick = run(async () => { if (!confirm('Remove logo?')) return; await api('DELETE', '/api/settings/logo'); viewSettings(); }));
 }

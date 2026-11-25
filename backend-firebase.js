@@ -26,6 +26,15 @@ const DEFAULT_SETTINGS = {
   report_footer: 'Thank you for trusting Sveiki Construction.',
   report_show_costs: '0',
   preventive_lead_days: '7',
+  // Technician field workflow sections ('1' = enabled, '0' = disabled)
+  field_show_diagnosis: '1',
+  field_show_photos: '1',
+  field_show_checklist: '0',
+  field_show_parts: '1',
+  field_show_work_done: '1',
+  field_show_recommendations: '1',
+  field_show_received_by: '0',
+  field_show_signature: '0',
 };
 
 const CATALOGS = {
@@ -933,7 +942,10 @@ export async function createBackend(config) {
     const upd = {};
     assertWork(o, { requireArrival: true });
 
-    if (Array.isArray(b.checklist) && o.checklist) upd.checklist = mergeChecklist(o.checklist, b.checklist);
+    const fCfg = can('orders', 2) ? null : await settingsDoc();
+    if (Array.isArray(b.checklist) && o.checklist && (!fCfg || fCfg.field_show_checklist !== '0')) {
+      upd.checklist = mergeChecklist(o.checklist, b.checklist);
+    }
 
     if (can('orders', 2)) {
       const keys = ['type', 'priority', 'status', 'reported_issue', 'diagnosis', 'work_done', 'recommendations', 'received_by'];
@@ -956,8 +968,14 @@ export async function createBackend(config) {
       if (status === 'pendiente' && tech) upd.status = 'asignada';
       if (status === 'asignada' && !tech) upd.status = 'pendiente';
     } else {
-      ['diagnosis', 'work_done', 'recommendations', 'received_by'].forEach(k => {
-        if (k in b && b[k] !== undefined) upd[k] = b[k] ?? null;
+      const fMap = {
+        diagnosis: 'field_show_diagnosis',
+        work_done: 'field_show_work_done',
+        recommendations: 'field_show_recommendations',
+        received_by: 'field_show_received_by',
+      };
+      Object.entries(fMap).forEach(([k, flag]) => {
+        if (k in b && b[k] !== undefined && fCfg?.[flag] !== '0') upd[k] = b[k] ?? null;
       });
     }
 
@@ -991,20 +1009,24 @@ export async function createBackend(config) {
     if (isClosed(o)) throw new ApiError('This work order is already closed');
     if (!o.arrival_at) throw new ApiError('Record arrival first');
     if (o.departure_at) throw new ApiError('Departure already recorded');
-    const diagnosis = b.diagnosis ?? o.diagnosis;
-    if (!diagnosis || !String(diagnosis).trim()) throw new ApiError('Enter the diagnosis before closing');
+    const fCfg = can('orders', 2) ? null : await settingsDoc();
+    const diagRequired = !fCfg || fCfg.field_show_diagnosis !== '0';
+    const diagnosis = (fCfg && fCfg.field_show_diagnosis === '0') ? (o.diagnosis ?? null) : (b.diagnosis ?? o.diagnosis);
+    if (diagRequired && (!diagnosis || !String(diagnosis).trim())) throw new ApiError('Enter the diagnosis before closing');
     const upd = {
       diagnosis,
-      work_done: b.work_done ?? o.work_done,
-      recommendations: b.recommendations ?? o.recommendations,
-      received_by: b.received_by ?? o.received_by,
+      work_done: (fCfg && fCfg.field_show_work_done === '0') ? (o.work_done ?? null) : (b.work_done ?? o.work_done),
+      recommendations: (fCfg && fCfg.field_show_recommendations === '0') ? (o.recommendations ?? null) : (b.recommendations ?? o.recommendations),
+      received_by: (fCfg && fCfg.field_show_received_by === '0') ? (o.received_by ?? null) : (b.received_by ?? o.received_by),
       departure_at: serverTimestamp(),
       departure_lat: b.lat ?? null,
       departure_lng: b.lng ?? null,
       status: 'completada',
       updated_at: serverTimestamp(),
     };
-    if (Array.isArray(b.checklist) && o.checklist) upd.checklist = mergeChecklist(o.checklist, b.checklist);
+    if (Array.isArray(b.checklist) && o.checklist && (!fCfg || fCfg.field_show_checklist !== '0')) {
+      upd.checklist = mergeChecklist(o.checklist, b.checklist);
+    }
     await updateDoc(ref('orders', o.id), upd);
     return getOrderFull(o.id);
   });
@@ -1019,6 +1041,9 @@ export async function createBackend(config) {
       if (!ps.exists()) throw new ApiError('Part not found');
       const o = os.data(), part = ps.data();
       assertWork({ ...o, id: os.id }, { requireArrival: true });
+      if (!can('orders', 2) && (await settingsDoc()).field_show_parts === '0') {
+        throw new ApiError('Parts section is disabled for field technicians', 403);
+      }
       const line = {
         id: rid(),
         part_id: ps.id,
@@ -1057,6 +1082,9 @@ export async function createBackend(config) {
   R('POST', '/api/orders/:id/photos', async (p, body) => {
     const o = await readOrder(p.id);
     assertWork(o, { requireArrival: true });
+    if (!can('orders', 2) && (await settingsDoc()).field_show_photos === '0') {
+      throw new ApiError('Photos section is disabled for field technicians', 403);
+    }
     const file = body.get('photo');
     if (!file) throw new ApiError('Image file required');
     const data = await imageToDataURL(file);
@@ -1092,6 +1120,9 @@ export async function createBackend(config) {
   R('POST', '/api/orders/:id/signature', async (p, body) => {
     const o = await readOrder(p.id);
     assertWork(o, { requireArrival: true });
+    if (!can('orders', 2) && (await settingsDoc()).field_show_signature === '0') {
+      throw new ApiError('Client signature is disabled for field technicians', 403);
+    }
     const file = body.get('signature');
     if (!file) throw new ApiError('Signature image required');
     const data = await imageToDataURL(file, { maxSide: 900, type: 'image/png', maxChars: 400000 });
