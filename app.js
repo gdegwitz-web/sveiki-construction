@@ -714,7 +714,7 @@ function orderCard(o) {
   const eq = [o.eq_location, o.eq_brand, o.eq_btu && o.eq_btu + ' BTU'].filter(Boolean).join(' · ');
   return `<div class="oitem p-${o.priority}" data-id="${o.id}">
     <div class="row between"><span class="t">${esc(o.client_name)}</span><span>${badgeSt(o.status)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</span></div>
-    <div class="small muted">${otCode(o.id)} · ${TYPE[o.type]}${eq ? ' · ' + esc(eq) : ''}</div>
+    <div class="small muted">${otCode(o.id)} · ${TYPE[o.type]}${eq ? ' · ' + esc(eq) : ''}${o.estimated_minutes ? ' · ⏱ ~' + fmtDur(o.estimated_minutes) : ''}</div>
     ${o.reported_issue ? `<div style="margin-top:6px">${esc(o.reported_issue)}</div>` : ''}
     <div class="small ${isOverdue(o) ? 'overdue' : 'muted'}" style="margin-top:6px">${o.status === 'en_progreso' ? '⏱ On site since ' + fmtT(o.arrival_at)
       : o.status === 'completada' ? 'Closed ' + fmtDT(o.departure_at) + ' · ' + fmtDur(mins(o.arrival_at, o.departure_at))
@@ -805,7 +805,7 @@ function renderOrder(o, partsCat, cfg = S.settings || {}) {
       <div><h3>Client</h3><b>${esc(o.client_name)}</b>${o.client_address ? `<div class="small muted">${esc(o.client_address)} · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${encodeURIComponent(o.client_address)}">Directions</a></div>` : ''}
         ${o.contact_name || o.contact_phone ? `<div class="small">Contact: ${esc(o.contact_name || '')} ${o.contact_phone ? `<a href="tel:${esc(o.contact_phone)}">${esc(o.contact_phone)}</a>` : ''}</div>` : ''}</div>
       <div><h3>Unit</h3>${o.equipment_id ? `<b>${esc(o.eq_location)}</b><div class="small muted">${esc(eq)}${o.eq_serial ? ' · S/N ' + esc(o.eq_serial) : ''}</div>` : '<span class="muted">No specific unit</span>'}</div>
-      <div><h3>Technician</h3>${esc(o.technician_name || 'Unassigned')}${o.scheduled_at ? `<div class="small muted">Scheduled: ${fmtDT(o.scheduled_at)}</div>` : ''}</div>
+      <div><h3>Technician</h3>${esc(o.technician_name || 'Unassigned')}${o.scheduled_at ? `<div class="small muted">Scheduled: ${fmtDT(o.scheduled_at)}</div>` : ''}${o.estimated_minutes ? `<div class="small muted">Est. duration: ~${fmtDur(o.estimated_minutes)}</div>` : ''}</div>
     </div>
     ${o.reported_issue ? `<div style="margin-top:12px"><h3>Reported issue / task</h3>${esc(o.reported_issue)}</div>` : ''}
   </div>
@@ -1104,52 +1104,291 @@ async function viewOrders(q) {
 
 // ================= Master: preventive plans =================
 async function viewPlans() {
-  const [plans, clients, equipment, users, checklists, s] = await Promise.all([api('GET', '/api/plans'), load('clients', true), load('equipment', true), api('GET', '/api/technicians'), load('checklists', true), settings(true)]);
+  const [plans, clients, equipment, users, checklists, s] = await Promise.all([
+    api('GET', '/api/plans'),
+    load('clients', true),
+    load('equipment', true),
+    api('GET', '/api/technicians'),
+    load('checklists', true),
+    settings(true),
+  ]);
   const techs = users;
   const editable = can('plans', 2);
   const prevCk = (checklists.find(c => c.type === 'preventivo') || {}).id || '';
   const ckOpts = [['', '— No checklist —'], ...checklists.map(c => [c.id, c.name])];
   const techOpts = [['', '— Unassigned —'], ...techs.map(u => [u.id, u.name])];
-  const freqOpts = r => { const v = r?.every_days || 90; return FREQ.some(f => f[0] == v) ? FREQ : [...FREQ, [v, `Every ${v} days`]]; };
+  const clientTypeLabels = { hotel: 'Hotel', condominio: 'Condominium', otro: 'Other' };
+  const clientById = Object.fromEntries(clients.map(c => [c.id, c]));
+
+  const freqPresets = [...FREQ, ['custom', 'Custom interval (days)…']];
   const optHtml = arr => arr.map(x => `<option value="${esc(x[0])}">${esc(x[1])}</option>`).join('');
-  const eqOpts = cid => { const list = equipment.filter(e => e.client_id == cid); return [['all', `★ All units of this client (${list.length})`], ...list.map(e => [e.id, [e.location, e.kind, e.btu && e.btu + ' BTU'].filter(Boolean).join(' · ')])]; };
+
+  const distinctKinds = [...new Set(equipment.map(e => (e.kind || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const distinctBrands = [...new Set(equipment.map(e => (e.brand || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+  const eqOptsForClient = cid => {
+    const list = equipment.filter(e => !cid || e.client_id == cid);
+    return list.map(e => [
+      e.id,
+      [e.location, e.kind, e.brand, e.btu && e.btu + ' BTU'].filter(Boolean).join(' · ') + (!cid && clientById[e.client_id] ? ` (${clientById[e.client_id].name})` : ''),
+    ]);
+  };
+
+  const countMatches = (f) => {
+    if (!f) return 0;
+    const scope = f.elements.scope_type?.value || 'client';
+    const cid = f.elements.client_id?.value || '';
+    const ctype = f.elements.client_type?.value || '';
+    const eid = f.elements.equipment_id?.value || '';
+    const kind = (f.elements.eq_kind?.value || '').trim().toLowerCase();
+    const brand = (f.elements.eq_brand?.value || '').trim().toLowerCase();
+    return equipment.filter(e => {
+      if (scope === 'unit') return e.id === eid;
+      if (scope === 'client') return e.client_id === cid;
+      if (scope === 'client_type') return (clientById[e.client_id]?.type || 'otro') === ctype;
+      if (scope === 'eq_kind') return (!cid || e.client_id === cid) && kind && (e.kind || '').trim().toLowerCase() === kind;
+      if (scope === 'eq_brand') return (!cid || e.client_id === cid) && brand && (e.brand || '').trim().toLowerCase() === brand;
+      if (scope === 'eq_kind_brand') return (!cid || e.client_id === cid) && kind && brand && (e.kind || '').trim().toLowerCase() === kind && (e.brand || '').trim().toLowerCase() === brand;
+      return false;
+    }).length;
+  };
 
   const form = r => {
     if (!r && !equipment.length) throw new Error('Add units first (Units page)');
-    const firstClient = clients[0]?.id;
+    const firstClient = clients[0]?.id || '';
+    const isPreset = !r || FREQ.some(f => f[0] == r.every_days);
+
     const fields = r ? [
-      { type: 'html', html: `<p class="muted" style="margin-top:-6px"><b>${esc(r.client_name)}</b> · ${esc(r.location)}</p>` },
+      { type: 'html', html: `<p class="muted" style="margin-top:-6px"><b>${esc(r.client_name)}</b> · ${esc(r.location)}${r.kind || r.brand ? ` <span class="small">(${esc([r.kind, r.brand].filter(Boolean).join(' · '))})</span>` : ''}</p>` },
     ] : [
-      { name: 'client_id', label: 'Client', type: 'select', required: true, value: firstClient, options: clients.map(c => [c.id, c.name]),
-        onchange: (e, f) => { f.elements.equipment_id.innerHTML = optHtml(eqOpts(e.target.value)); } },
-      { name: 'equipment_id', label: 'Unit(s)', type: 'select', required: true, value: 'all', options: eqOpts(firstClient) },
+      {
+        name: 'scope_type',
+        label: 'Apply schedule by',
+        type: 'select',
+        value: 'client',
+        options: [
+          ['client', 'Client (all units of a client)'],
+          ['client_type', 'Facility / client type (Hotel, Condominium, Other)'],
+          ['eq_kind', 'Equipment type (Split, Cassette, Chiller, etc.)'],
+          ['eq_brand', 'Equipment brand (Carrier, LG, York, etc.)'],
+          ['eq_kind_brand', 'Equipment type + Brand'],
+          ['unit', 'Single specific unit'],
+        ],
+      },
+      {
+        name: 'client_id',
+        label: 'Client',
+        type: 'select',
+        value: firstClient,
+        options: clients.map(c => [c.id, c.name]),
+      },
+      {
+        name: 'client_type',
+        label: 'Facility / client type',
+        type: 'select',
+        value: 'hotel',
+        options: [['hotel', 'Hotel'], ['condominio', 'Condominium'], ['otro', 'Other']],
+      },
+      {
+        name: 'eq_kind',
+        label: 'Equipment type',
+        type: 'select',
+        value: distinctKinds[0] || '',
+        options: distinctKinds.length ? distinctKinds.map(k => [k, k]) : [['', '— No equipment types registered —']],
+        half: true,
+      },
+      {
+        name: 'eq_brand',
+        label: 'Brand',
+        type: 'select',
+        value: distinctBrands[0] || '',
+        options: distinctBrands.length ? distinctBrands.map(b => [b, b]) : [['', '— No brands registered —']],
+        half: true,
+      },
+      {
+        name: 'equipment_id',
+        label: 'Unit',
+        type: 'select',
+        value: eqOptsForClient(firstClient)[0]?.[0] || '',
+        options: eqOptsForClient(firstClient),
+      },
+      { type: 'html', html: `<div id="planMatchBanner" class="small" style="background:var(--sky-soft);border:1px solid var(--sky-border);color:var(--navy);padding:8px 12px;border-radius:10px;margin-bottom:12px;font-weight:600"></div>` },
     ];
+
     fields.push(
-      { name: 'every_days', label: 'Frequency', type: 'select', value: r?.every_days || 90, options: freqOpts(r), half: true },
-      { name: 'next_due', label: r ? 'Next due date' : 'First due date', type: 'date', required: true, value: r?.next_due || today(), half: true },
+      {
+        name: 'every_preset',
+        label: 'Maintenance frequency',
+        type: 'select',
+        value: isPreset ? (r?.every_days || 90) : 'custom',
+        options: freqPresets,
+        half: true,
+      },
+      {
+        name: 'every_days_custom',
+        label: 'Interval (days)',
+        type: 'number',
+        min: 1,
+        value: r?.every_days || 90,
+        placeholder: 'E.g. 45',
+        half: true,
+      },
+      {
+        name: 'next_due',
+        label: r ? 'Next due date' : 'First due date',
+        type: 'date',
+        required: true,
+        value: r?.next_due || today(),
+        half: true,
+      },
+      {
+        name: 'estimated_minutes',
+        label: 'Est. service time (min)',
+        type: 'number',
+        min: 0,
+        step: 5,
+        value: r?.estimated_minutes ?? '',
+        placeholder: 'E.g. 60',
+        half: true,
+      },
       { name: 'technician_id', label: 'Default technician', type: 'select', value: r?.technician_id, options: techOpts },
       { name: 'checklist_id', label: 'Checklist', type: 'select', value: r ? r.checklist_id : prevCk, options: ckOpts, half: true },
       { name: 'priority', label: 'Priority', type: 'select', value: r?.priority || 'media', options: Object.entries(PR), half: true },
       { name: 'task', label: 'Task description (shown on the work order)', type: 'textarea', value: r?.task, placeholder: 'E.g. Quarterly maintenance: clean filters and coils, check drain and electrical.' },
     );
-    if (r) fields.push({ name: 'active', label: 'Status', type: 'select', value: r.active ?? 1, options: [[1, 'Active'], [0, 'Paused']] });
-    formModal(r ? 'Edit preventive plan' : 'New preventive plan', fields, async d => {
-      if (d.active != null) d.active = +d.active;
-      const res = await api(r ? 'PUT' : 'POST', '/api/plans' + (r ? '/' + r.id : ''), d);
-      toast(`${res.plans ? res.plans + ' plan(s) saved' : 'Plan saved'}${res.orders ? ` · ${res.orders} work order(s) generated` : ''}`);
+
+    if (!r) {
+      fields.push({
+        type: 'html',
+        html: `<label class="restrict-item" style="margin-bottom:10px"><input type="checkbox" name="replace_existing" value="1" checked><span>Replace existing active preventive plans on matching units</span></label>`,
+      });
+    } else {
+      fields.push({ name: 'active', label: 'Status', type: 'select', value: r.active ?? 1, options: [[1, 'Active'], [0, 'Paused']] });
+    }
+
+    const f = formModal(r ? 'Edit preventive plan' : 'New preventive plan', fields, async d => {
+      const every = d.every_preset === 'custom' ? parseInt(d.every_days_custom, 10) : parseInt(d.every_preset, 10);
+      if (!(every > 0)) throw new Error('Enter a valid maintenance interval in days');
+      const payload = {
+        ...d,
+        every_days: every,
+        estimated_minutes: d.estimated_minutes !== '' ? parseInt(d.estimated_minutes, 10) : null,
+      };
+      if (payload.active != null) payload.active = +payload.active;
+      const res = await api(r ? 'PUT' : 'POST', '/api/plans' + (r ? '/' + r.id : ''), payload);
+      const repNote = res.replaced ? ` (${res.replaced} previous replaced)` : '';
+      toast(`${res.plans ? res.plans + ' plan(s) saved' + repNote : 'Plan saved'}${res.orders ? ` · ${res.orders} work order(s) generated` : ''}`);
       viewPlans();
     });
+
+    const toggleField = (name, show) => {
+      const el = f.elements[name];
+      const wrap = el?.closest('.field');
+      if (wrap) wrap.style.display = show ? '' : 'none';
+    };
+
+    const syncCustomDays = () => {
+      const isCust = f.elements.every_preset?.value === 'custom';
+      toggleField('every_days_custom', isCust);
+      if (!isCust && f.elements.every_days_custom) {
+        f.elements.every_days_custom.value = f.elements.every_preset.value;
+      }
+    };
+    f.elements.every_preset?.addEventListener('change', syncCustomDays);
+    syncCustomDays();
+
+    if (!r) {
+      const syncScope = () => {
+        const sc = f.elements.scope_type.value;
+        const clientSel = f.elements.client_id;
+        // For eq_kind / eq_brand / eq_kind_brand allow either All clients or a specific client
+        if (['eq_kind', 'eq_brand', 'eq_kind_brand'].includes(sc)) {
+          if (clientSel.options[0]?.value !== '') {
+            const cur = clientSel.value;
+            clientSel.innerHTML = optHtml([['', '★ All clients'], ...clients.map(c => [c.id, c.name])]);
+            clientSel.value = cur && clients.some(c => c.id === cur) ? cur : '';
+          }
+        } else if (clientSel.options[0]?.value === '') {
+          clientSel.innerHTML = optHtml(clients.map(c => [c.id, c.name]));
+          clientSel.value = firstClient;
+        }
+
+        toggleField('client_id', ['unit', 'client', 'eq_kind', 'eq_brand', 'eq_kind_brand'].includes(sc));
+        toggleField('client_type', sc === 'client_type');
+        toggleField('eq_kind', ['eq_kind', 'eq_kind_brand'].includes(sc));
+        toggleField('eq_brand', ['eq_brand', 'eq_kind_brand'].includes(sc));
+        toggleField('equipment_id', sc === 'unit');
+
+        if (sc === 'unit') {
+          const curEq = f.elements.equipment_id.value;
+          const opts = eqOptsForClient(f.elements.client_id.value);
+          f.elements.equipment_id.innerHTML = optHtml(opts);
+          if (opts.some(o => o[0] === curEq)) f.elements.equipment_id.value = curEq;
+        }
+
+        const n = countMatches(f);
+        const banner = $('#planMatchBanner');
+        if (banner) {
+          banner.textContent = n
+            ? `✓ This rule will apply to ${n} active unit(s)`
+            : '⚠ No active units match this selection';
+          banner.style.color = n ? 'var(--navy)' : 'var(--bad)';
+        }
+      };
+
+      ['scope_type', 'client_id', 'client_type', 'eq_kind', 'eq_brand', 'equipment_id'].forEach(nm => {
+        f.elements[nm]?.addEventListener('change', syncScope);
+      });
+      syncScope();
+    }
   };
+
   const due = p => p.next_due <= today();
+  const planKinds = [...new Set(plans.map(p => (p.kind || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const planBrands = [...new Set(plans.map(p => (p.brand || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
   app.innerHTML = `
-  <div class="row between"><h1>Preventive plans</h1>${editable ? '<div class="row"><button class="btn" id="bRun">⟳ Generate due orders now</button><button class="btn pri" id="bNew">+ New plan</button></div>' : ''}</div>
-  <p class="muted small" style="margin-top:-6px">Work orders are created automatically ${esc(s.preventive_lead_days)} day(s) before each due date${FB() ? ' (checked every time a master opens the app)' : ' (checked every hour)'}. Change the lead time in Settings.</p>
-  <div class="card tbl-wrap">${plans.length ? `<table><thead><tr><th>Client / unit</th><th>Frequency</th><th>Next due</th><th class="hide-m">Technician</th><th class="hide-m">Checklist</th><th>Open order</th></tr></thead><tbody>
-  ${plans.map((p, i) => `<tr class="click" data-i="${i}" style="${p.active ? '' : 'opacity:.5'}"><td><b>${esc(p.client_name)}</b><div class="small muted">${esc(p.location)}${p.kind ? ' · ' + esc(p.kind) : ''}</div></td>
-    <td>${(FREQ.find(f => f[0] == p.every_days) || [, `Every ${p.every_days} days`])[1].replace(/ \(.*\)/, '')}</td>
-    <td class="${due(p) ? 'overdue' : ''}">${fmtYMD(p.next_due)}${p.active ? '' : ' · paused'}</td><td class="hide-m">${esc(p.technician_name || '—')}</td><td class="hide-m small">${esc(p.checklist_name || '—')}</td>
-    <td>${p.open_order_id ? `<a class="link" href="#/orden/${p.open_order_id}" onclick="event.stopPropagation()">${otCode(p.open_order_id)}</a>` : p.open_orders ? `${p.open_orders} open` : '—'}</td></tr>`).join('')}
-  </tbody></table>` : '<div class="empty">No preventive plans yet. Create one per unit, or for all units of a client at once.</div>'}</div>`;
+  <div class="row between"><h1>Preventive plans</h1>${editable ? '<div class="row"><button class="btn" id="bRun">⟳ Generate due orders now</button><button class="btn pri" id="bNew">+ New plan / rule</button></div>' : ''}</div>
+  <p class="muted small" style="margin-top:-6px">Define maintenance intervals by unit, client, facility type, equipment type or brand. Work orders are created automatically ${esc(s.preventive_lead_days)} day(s) before each due date${FB() ? ' (checked every time a master opens the app)' : ' (checked every hour)'}.</p>
+  ${plans.length ? `<div class="card row" id="planFilters">
+    <select id="pfClient" style="flex:1;min-width:150px"><option value="">All clients</option>${clients.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+    <select id="pfCType" style="flex:1;min-width:140px"><option value="">All facility types</option><option value="hotel">Hotel</option><option value="condominio">Condominium</option><option value="otro">Other</option></select>
+    <select id="pfKind" style="flex:1;min-width:140px"><option value="">All equipment types</option>${planKinds.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('')}</select>
+    <select id="pfBrand" style="flex:1;min-width:140px"><option value="">All brands</option>${planBrands.map(b => `<option value="${esc(b)}">${esc(b)}</option>`).join('')}</select>
+  </div>` : ''}
+  <div class="card tbl-wrap">${plans.length ? `<table id="plansTbl"><thead><tr><th>Client / unit</th><th>Type &amp; Brand</th><th>Frequency</th><th>Next due</th><th class="hide-m">Technician</th><th class="hide-m">Checklist</th><th>Open order</th></tr></thead><tbody>
+  ${plans.map((p, i) => {
+    const freqLabel = (FREQ.find(f => f[0] == p.every_days) || [, `Every ${p.every_days} days`])[1].replace(/ \(.*\)/, '');
+    const cTypeLabel = clientTypeLabels[p.client_type] || 'Other';
+    return `<tr class="click" data-i="${i}" data-cid="${esc(p.client_id || '')}" data-ctype="${esc(p.client_type || 'otro')}" data-kind="${esc((p.kind || '').trim())}" data-brand="${esc((p.brand || '').trim())}" style="${p.active ? '' : 'opacity:.5'}">
+      <td><b>${esc(p.client_name)}</b> <span class="small muted">(${esc(cTypeLabel)})</span><div class="small muted">${esc(p.location)}</div></td>
+      <td>${esc([p.kind, p.brand].filter(Boolean).join(' · ') || '—')}${p.btu ? `<div class="small muted">${Number(p.btu).toLocaleString('en-US')} BTU</div>` : ''}</td>
+      <td><b>${esc(freqLabel)}</b>${p.estimated_minutes ? `<div class="small muted">⏱ ~${fmtDur(p.estimated_minutes)}</div>` : ''}</td>
+      <td class="${due(p) ? 'overdue' : ''}">${fmtYMD(p.next_due)}${p.active ? '' : ' · paused'}</td>
+      <td class="hide-m">${esc(p.technician_name || '—')}</td>
+      <td class="hide-m small">${esc(p.checklist_name || '—')}</td>
+      <td>${p.open_order_id ? `<a class="link" href="#/orden/${p.open_order_id}" onclick="event.stopPropagation()">${otCode(p.open_order_id)}</a>` : p.open_orders ? `${p.open_orders} open` : '—'}</td>
+    </tr>`;
+  }).join('')}
+  </tbody></table>` : '<div class="empty">No preventive plans yet. Create schedules by unit, client, facility type, equipment type, or brand.</div>'}</div>`;
+
+  if (plans.length) {
+    const applyPlanFilters = () => {
+      const cid = $('#pfClient')?.value || '';
+      const ct = $('#pfCType')?.value || '';
+      const kd = $('#pfKind')?.value || '';
+      const br = $('#pfBrand')?.value || '';
+      app.querySelectorAll('#plansTbl tbody tr').forEach(tr => {
+        const ok = (!cid || tr.dataset.cid === cid)
+          && (!ct || tr.dataset.ctype === ct)
+          && (!kd || tr.dataset.kind === kd)
+          && (!br || tr.dataset.brand === br);
+        tr.hidden = !ok;
+      });
+    };
+    ['#pfClient', '#pfCType', '#pfKind', '#pfBrand'].forEach(sel => $(sel)?.addEventListener('change', applyPlanFilters));
+  }
+
   if (!editable) { app.querySelectorAll('tr.click').forEach(tr => tr.classList.remove('click')); return; }
   $('#bNew').onclick = run(() => form());
   $('#bRun').onclick = run(async () => { const r = await api('POST', '/api/plans/run'); toast(r.orders ? `${r.orders} work order(s) generated` : 'Nothing due right now'); viewPlans(); });

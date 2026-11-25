@@ -366,6 +366,7 @@ export async function createBackend(config) {
       status: b.technician_id ? 'asignada' : 'pendiente',
       reported_issue: blank(b.reported_issue),
       scheduled_at: toTs(b.scheduled_at),
+      estimated_minutes: blank(b.estimated_minutes) != null ? Number(b.estimated_minutes) : null,
       checklist: await checklistFromTemplate(b.checklist_id),
       plan_id: b.plan_id || null,
       created_by: me.id,
@@ -466,6 +467,7 @@ export async function createBackend(config) {
         priority: p.priority,
         reported_issue: p.task || `Scheduled preventive maintenance (every ${p.every_days} days)`,
         scheduled_at: new Date(p.next_due + 'T08:00:00').toISOString(),
+        estimated_minutes: p.estimated_minutes ?? null,
         checklist_id: p.checklist_id,
         plan_id: pd.id,
       });
@@ -862,6 +864,7 @@ export async function createBackend(config) {
     const openIds = new Set(open.docs.map(d => Number(d.id)));
     return plans.map(p => {
       const e = E[p.equipment_id] || {};
+      const c = C[e.client_id] || {};
       return {
         ...p,
         location: e.location,
@@ -869,7 +872,8 @@ export async function createBackend(config) {
         brand: e.brand,
         btu: e.btu,
         client_id: e.client_id,
-        client_name: C[e.client_id]?.name || '—',
+        client_name: c.name || '—',
+        client_type: c.type || 'otro',
         technician_name: U[p.technician_id]?.name,
         checklist_name: K[p.checklist_id]?.name,
         open_order_id: openIds.has(Number(p.open_order_id)) ? p.open_order_id : null,
@@ -880,17 +884,58 @@ export async function createBackend(config) {
   R('POST', '/api/plans', async (p, b) => {
     need('plans', 2);
     const every = parseInt(b.every_days, 10);
-    if (!(every > 0)) throw new ApiError('Frequency (days) must be greater than 0');
+    if (!(every > 0) || every > 3650) throw new ApiError('Maintenance interval (days) must be between 1 and 3650');
     if (!/^\d{4}-\d\d-\d\d$/.test(b.next_due || '')) throw new ApiError('First due date required');
-    let ids;
-    if (b.equipment_id === 'all') {
-      ids = (await list('equipment')).filter(e => e.client_id === b.client_id).map(e => e.id);
-      if (!ids.length) throw new ApiError('This client has no active units');
-    } else if (b.equipment_id) {
-      ids = [b.equipment_id];
+    const estMin = blank(b.estimated_minutes) != null ? Math.max(0, parseInt(b.estimated_minutes, 10) || 0) : null;
+
+    const [activeEq, activeClients] = await Promise.all([list('equipment'), list('clients')]);
+    const clientById = Object.fromEntries(activeClients.map(c => [c.id, c]));
+    const normStr = s => String(s || '').trim().toLowerCase();
+
+    const scope = b.scope_type || (b.equipment_id === 'all' ? 'client' : 'unit');
+    let targetEq = [];
+
+    if (scope === 'unit') {
+      if (!b.equipment_id) throw new ApiError('Select a unit');
+      targetEq = activeEq.filter(e => e.id === b.equipment_id);
+    } else if (scope === 'client') {
+      if (!b.client_id) throw new ApiError('Select a client');
+      targetEq = activeEq.filter(e => e.client_id === b.client_id);
+      if (!targetEq.length) throw new ApiError('This client has no active units');
+    } else if (scope === 'client_type') {
+      if (!b.client_type) throw new ApiError('Select a facility / client type');
+      targetEq = activeEq.filter(e => {
+        const c = clientById[e.client_id];
+        return c && (c.type || 'otro') === b.client_type;
+      });
+      if (!targetEq.length) throw new ApiError('No active units found for this facility type');
+    } else if (scope === 'eq_kind') {
+      if (!b.eq_kind) throw new ApiError('Select an equipment type');
+      targetEq = activeEq.filter(e => (!b.client_id || e.client_id === b.client_id) && normStr(e.kind) === normStr(b.eq_kind));
+      if (!targetEq.length) throw new ApiError('No active units match that equipment type');
+    } else if (scope === 'eq_brand') {
+      if (!b.eq_brand) throw new ApiError('Select a brand');
+      targetEq = activeEq.filter(e => (!b.client_id || e.client_id === b.client_id) && normStr(e.brand) === normStr(b.eq_brand));
+      if (!targetEq.length) throw new ApiError('No active units match that brand');
+    } else if (scope === 'eq_kind_brand') {
+      if (!b.eq_kind || !b.eq_brand) throw new ApiError('Select both equipment type and brand');
+      targetEq = activeEq.filter(e => (!b.client_id || e.client_id === b.client_id) && normStr(e.kind) === normStr(b.eq_kind) && normStr(e.brand) === normStr(b.eq_brand));
+      if (!targetEq.length) throw new ApiError('No active units match that equipment type + brand combination');
     } else {
-      throw new ApiError('Select a unit');
+      throw new ApiError('Invalid rule scope');
     }
+
+    const ids = targetEq.map(e => e.id);
+    const existingPlans = b.replace_existing === '1'
+      ? (await list('plans', { all: true })).filter(pl => pl.active !== 0 && ids.includes(pl.equipment_id))
+      : [];
+
+    for (let i = 0; i < existingPlans.length; i += 400) {
+      const batch = writeBatch(db);
+      existingPlans.slice(i, i + 400).forEach(pl => batch.update(ref('plans', pl.id), { active: 0 }));
+      await batch.commit();
+    }
+
     for (let i = 0; i < ids.length; i += 400) {
       const batch = writeBatch(db);
       ids.slice(i, i + 400).forEach(eid => batch.set(doc(col('plans')), {
@@ -898,6 +943,8 @@ export async function createBackend(config) {
         technician_id: blank(b.technician_id),
         checklist_id: blank(b.checklist_id),
         every_days: every,
+        estimated_minutes: estMin,
+        rule_scope: scope,
         next_due: b.next_due,
         priority: b.priority || 'media',
         task: blank(b.task),
@@ -907,17 +954,19 @@ export async function createBackend(config) {
       }));
       await batch.commit();
     }
-    return { plans: ids.length, orders: await runPlans() };
+    return { plans: ids.length, replaced: existingPlans.length, orders: await runPlans() };
   });
 
   R('PUT', '/api/plans/:id', async (p, b) => {
     need('plans', 2);
     const every = parseInt(b.every_days, 10);
-    if (!(every > 0)) throw new ApiError('Frequency (days) must be greater than 0');
+    if (!(every > 0) || every > 3650) throw new ApiError('Maintenance interval (days) must be between 1 and 3650');
+    const estMin = blank(b.estimated_minutes) != null ? Math.max(0, parseInt(b.estimated_minutes, 10) || 0) : null;
     await updateDoc(ref('plans', p.id), {
       technician_id: blank(b.technician_id),
       checklist_id: blank(b.checklist_id),
       every_days: every,
+      estimated_minutes: estMin,
       next_due: b.next_due,
       priority: b.priority || 'media',
       task: blank(b.task),
