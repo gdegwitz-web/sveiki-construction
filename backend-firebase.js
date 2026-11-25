@@ -147,6 +147,8 @@ export async function createBackend(config) {
   if (auth.authStateReady) await auth.authStateReady();
 
   let me = null;
+  let realMe = null;
+  let impersonateUid = null;
   const photoCache = new Map();
   const photoOrder = new Map();
   const sigCache = new Map();
@@ -173,35 +175,56 @@ export async function createBackend(config) {
     }
   }
 
-  async function loadMe() {
-    const u = auth.currentUser;
-    if (!u) { me = null; throw new ApiError('Not authenticated', 401); }
-    const s = await getDoc(ref('users', u.uid));
-    if (!s.exists() || s.data().active !== true) {
-      me = null;
-      await signOut(auth);
-      throw new ApiError('This account is not active. Contact the administrator.', 401);
-    }
-    const role = s.data().role;
+  async function buildUserObj(uid, data) {
+    const role = data.role;
     let prof = null;
     if (role !== 'developer') {
       const ps = await getDoc(ref('profiles', role));
       prof = ps.exists() ? ps.data() : null;
     }
-    const restrict = PERMS.cleanRestrict(s.data().restrict);
-    me = {
-      id: u.uid,
-      ...s.data(),
+    const restrict = PERMS.cleanRestrict(data.restrict);
+    return {
+      id: uid,
+      ...data,
       restrict,
-      created_at: iso(s.data().created_at),
+      created_at: iso(data.created_at),
       perms: PERMS.permsFor(role, prof ? { [role]: prof } : {}, restrict),
       role_name: role === 'developer' ? 'Developer' : (prof?.name || role),
     };
+  }
+
+  async function loadMe() {
+    const u = auth.currentUser;
+    if (!u) { me = null; realMe = null; impersonateUid = null; throw new ApiError('Not authenticated', 401); }
+    const s = await getDoc(ref('users', u.uid));
+    if (!s.exists() || s.data().active !== true) {
+      me = null;
+      realMe = null;
+      impersonateUid = null;
+      await signOut(auth);
+      throw new ApiError('This account is not active. Contact the administrator.', 401);
+    }
+    realMe = await buildUserObj(u.uid, s.data());
+    if (realMe.role === 'developer' && impersonateUid && impersonateUid !== u.uid) {
+      const ts = await getDoc(ref('users', impersonateUid));
+      if (ts.exists()) {
+        const targetObj = await buildUserObj(impersonateUid, ts.data());
+        me = {
+          ...targetObj,
+          impersonating: true,
+          real_user: { id: realMe.id, name: realMe.name, email: realMe.email, role: realMe.role },
+        };
+        return me;
+      } else {
+        impersonateUid = null;
+      }
+    }
+    me = realMe;
     return me;
   }
 
   async function ensureMe() {
-    if (!me || me.id !== auth.currentUser?.uid) await loadMe();
+    if (!realMe || realMe.id !== auth.currentUser?.uid) await loadMe();
     return me;
   }
 
@@ -623,6 +646,8 @@ export async function createBackend(config) {
 
   R('POST', '/api/logout', async () => {
     me = null;
+    realMe = null;
+    impersonateUid = null;
     photoCache.clear();
     sigCache.clear();
     logoCache = null;
@@ -638,7 +663,11 @@ export async function createBackend(config) {
 
   R('GET', '/api/me', async () => {
     const m = await loadMe();
-    return { id: m.id, name: m.name, email: m.email, role: m.role, phone: m.phone, active: m.active, perms: m.perms, role_name: m.role_name };
+    return {
+      id: m.id, name: m.name, email: m.email, role: m.role, phone: m.phone,
+      active: m.active, perms: m.perms, role_name: m.role_name,
+      ...(m.impersonating ? { impersonating: true, real_user: m.real_user } : {}),
+    };
   });
 
   R('POST', '/api/me/password', async (p, b) => {
@@ -1115,12 +1144,17 @@ export async function createBackend(config) {
   R('GET', '/api/reports/orders.csv', async (p, b, q) => csv(q));
 
   return {
-    async request(method, url, body) {
+    async request(method, url, body, opts = {}) {
       const u = new URL(url, location.href);
       const route = routes.find(r => r.method === method && r.re.test(u.pathname));
       if (!route) throw new ApiError(`Not available: ${method} ${u.pathname}`, 404);
       const params = u.pathname.match(route.re).groups || {};
       const q = Object.fromEntries(u.searchParams);
+      const nextImp = opts?.impersonate || null;
+      if (nextImp !== impersonateUid) {
+        impersonateUid = nextImp;
+        me = null;
+      }
       try {
         const open = ['/api/setup-status', '/api/setup', '/api/login', '/api/password-reset', '/api/me', '/api/logout'];
         if (!open.includes(u.pathname)) await ensureMe();

@@ -43,12 +43,20 @@ function toast(msg, err) {
 }
 
 // ---------- data access ----------
+const getImpersonateId = () => sessionStorage.getItem('sv_impersonate_uid') || '';
+function setImpersonateId(uid) {
+  if (uid) sessionStorage.setItem('sv_impersonate_uid', uid);
+  else sessionStorage.removeItem('sv_impersonate_uid');
+}
+
 async function api(method, url, body) {
+  const imp = getImpersonateId();
   if (BE) {
-    try { return await BE.request(method, url, body); }
-    catch (e) { if (e.status === 401 && url !== '/api/me' && !/\/(login|setup)/.test(url)) { S.me = null; renderLogin(); } throw e; }
+    try { return await BE.request(method, url, body, { impersonate: imp || null }); }
+    catch (e) { if (e.status === 401 && url !== '/api/me' && !/\/(login|setup)/.test(url)) { setImpersonateId(''); S.me = null; renderLogin(); } throw e; }
   }
   const opt = { method, headers: {}, credentials: 'same-origin' };
+  if (imp) opt.headers['X-Impersonate'] = imp;
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(url, opt);
@@ -299,6 +307,7 @@ async function verifyBiometricAssertion(bio) {
 
 function renderBiometricLock(user) {
   $('#topbar').hidden = true;
+  if ($('#impBanner')) $('#impBanner').hidden = true;
   document.body.classList.remove('report-mode');
   document.body.classList.add('auth-mode');
   clearInterval(tickTimer);
@@ -465,10 +474,109 @@ async function renderLogin() {
 // ---------- permissions ----------
 const can = (mod, lvl = 1) => (S.me?.perms?.[mod] || 0) >= lvl;
 const isDev = () => S.me?.role === 'developer';
+const isRealDev = () => S.me?.role === 'developer' || S.me?.real_user?.role === 'developer';
 const fullOrders = () => can('orders', 2);
+
+async function switchUserTo(uid) {
+  setImpersonateId(uid || '');
+  S.cache = {};
+  S.settings = null;
+  location.hash = '#/';
+  await boot();
+  if (uid && S.me) toast(`Viewing app as ${S.me.name} (${S.me.role_name || S.me.role})`);
+  else if (S.me) toast(`Returned to Developer account (${S.me.name})`);
+}
+
+function renderImpersonationBanner() {
+  let bar = $('#impBanner');
+  if (!S.me?.impersonating) {
+    if (bar) bar.hidden = true;
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'impBanner';
+    document.body.prepend(bar);
+  }
+  bar.hidden = false;
+  bar.innerHTML = `<div>👁️ <b>Developer Preview Mode:</b> Viewing as <b>${esc(S.me.name)}</b> (${esc(S.me.role_name || S.me.role)})${S.me.active === false ? ' · <span style="text-decoration:underline">Account Restricted</span>' : ''}</div>
+    <div class="row" style="gap:6px">
+      <button type="button" class="btn sm" id="bImpSwitch">Switch user</button>
+      <button type="button" class="btn sm" id="bImpExit">Exit to Developer</button>
+    </div>`;
+  $('#bImpSwitch').onclick = run(openSwitchUserModal);
+  $('#bImpExit').onclick = run(() => switchUserTo(''));
+}
+
+async function openSwitchUserModal() {
+  if (!isRealDev()) return;
+  const curImp = getImpersonateId();
+  // Temporarily query users/profiles as real developer so it works even while previewing a restricted user
+  let users = [], profiles = [];
+  setImpersonateId('');
+  try {
+    [users, profiles] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/profiles')]);
+  } finally {
+    setImpersonateId(curImp);
+  }
+  const pname = Object.fromEntries([['developer', 'Developer'], ...profiles.map(p => [p.key, p.name])]);
+  const realId = S.me?.real_user?.id || S.me?.id;
+  const dlg = $('#modal'), f = $('#modalForm');
+  f.innerHTML = `<h2>Switch user (Developer Preview)</h2>
+    <p class="muted small" style="margin-top:0">Test how the app looks and behaves for any user without signing out. Your developer permissions are restored immediately when you exit preview mode.</p>
+    <input type="search" id="swFilter" placeholder="Filter by name, email or role…" style="margin-bottom:4px">
+    <div class="switch-list" id="swList">
+      ${users.map(u => {
+        const isSelf = u.id === realId;
+        const isCurrent = u.id === S.me?.id;
+        return `<button type="button" class="switch-row ${isCurrent ? 'cur' : ''}" data-sw-uid="${isSelf ? '' : esc(u.id)}" data-sw-q="${esc((u.name + ' ' + u.email + ' ' + (pname[u.role] || u.role)).toLowerCase())}">
+          <div>
+            <b>${esc(u.name)}</b> ${isSelf ? '<span class="badge st-en_progreso">Your Developer Account</span>' : ''}
+            <div class="small muted">${esc(u.email)}</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <span class="badge ${u.role === 'developer' ? 'st-en_progreso' : u.role === 'master' ? 'st-asignada' : ''}">${esc(pname[u.role] || u.role)}</span>
+            ${u.active ? '' : '<span class="badge st-bad">Restricted</span>'}
+            ${isCurrent ? '<span class="badge st-completada">Current</span>' : ''}
+          </div>
+        </button>`;
+      }).join('')}
+    </div>
+    <div class="actions"><button class="btn" value="cancel" formnovalidate>Close</button></div>`;
+  f.onsubmit = () => {};
+  $('#swFilter').oninput = e => {
+    const q = e.target.value.trim().toLowerCase();
+    f.querySelectorAll('[data-sw-uid]').forEach(row => {
+      row.hidden = !!(q && !row.dataset.swQ.includes(q));
+    });
+  };
+  f.querySelectorAll('[data-sw-uid]').forEach(btn => btn.onclick = run(async () => {
+    dlg.close();
+    await switchUserTo(btn.dataset.swUid);
+  }));
+  dlg.showModal();
+}
+
 function renderNav() {
+  renderImpersonationBanner();
   $('#topbar').hidden = false;
   $('#whoName').textContent = `${S.me.name} · ${S.me.role_name || S.me.role}`;
+  const whoBox = $('.who');
+  let swBtn = $('#bTopSwitch');
+  if (isRealDev()) {
+    if (!swBtn && whoBox) {
+      swBtn = document.createElement('button');
+      swBtn.type = 'button';
+      swBtn.id = 'bTopSwitch';
+      swBtn.className = 'link';
+      swBtn.textContent = '⇄ Switch';
+      swBtn.title = 'Switch user to test permissions and views';
+      whoBox.insertBefore(swBtn, $('#btnMenu'));
+    }
+    if (swBtn) swBtn.onclick = run(openSwitchUserModal);
+  } else if (swBtn) {
+    swBtn.remove();
+  }
   const links = [
     can('dashboard') && can('orders') && ['#/', 'Dashboard'],
     can('orders') && ['#/ordenes', 'Work orders'],
@@ -532,14 +640,24 @@ $('#btnMenu').onclick = run(async () => {
   const a = $('#modalForm .actions');
   const b = document.createElement('button'); b.type = 'button'; b.className = 'btn bad'; b.textContent = 'Sign out'; b.style.marginRight = 'auto';
   b.onclick = run(async () => {
+    setImpersonateId('');
     await api('POST', '/api/logout');
     $('#modal').close();
     S.me = null;
     S.cache = {};
     S.settings = null;
+    renderImpersonationBanner();
     renderLogin();
   });
   a.prepend(b);
+  if (isRealDev()) {
+    const sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'btn';
+    sw.textContent = '⇄ Switch user';
+    sw.onclick = run(async () => { $('#modal').close(); await openSwitchUserModal(); });
+    a.insertBefore(sw, b.nextSibling);
+  }
 });
 
 function parseHash() {
@@ -1203,9 +1321,17 @@ async function viewUsers() {
       { h: 'Access', f: r => r.active
         ? '<span class="badge st-completada">Active</span>'
         : '<span class="badge st-bad">Restricted</span>' },
-      ...(isDev() ? [{ h: '', f: r => (r.role === 'developer' || r.id === S.me.id) ? '' : `<button type="button" class="btn sm ${r.active ? 'bad' : 'ok'}" data-tog-user="${esc(r.id)}">${r.active ? 'Restrict' : 'Restore'}</button>` }] : []),
+      ...(isDev() ? [{ h: '', f: r => (r.role === 'developer' || r.id === S.me.id) ? '' : `<div class="row" style="gap:6px;flex-wrap:nowrap">
+        <button type="button" class="btn sm" data-preview-user="${esc(r.id)}" title="Test app as this user">👁 Preview</button>
+        <button type="button" class="btn sm ${r.active ? 'bad' : 'ok'}" data-tog-user="${esc(r.id)}">${r.active ? 'Restrict' : 'Restore'}</button>
+      </div>` }] : []),
     ],
   });
+
+  app.querySelectorAll('[data-preview-user]').forEach(btn => btn.onclick = run(async ev => {
+    ev.stopPropagation();
+    await switchUserTo(btn.dataset.previewUser);
+  }));
 
   app.querySelectorAll('[data-tog-user]').forEach(btn => btn.onclick = run(async ev => {
     ev.stopPropagation();
