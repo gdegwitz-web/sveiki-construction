@@ -1293,7 +1293,7 @@ async function viewCalendar(q = {}) {
     prevDate = addDaysYMD(baseDate, -7);
     nextDate = addDaysYMD(baseDate, 7);
 
-    bodyHtml = `<div class="card tbl-wrap"><div class="cal-7grid">${days.map(dStr => {
+    bodyHtml = `<div class="card"><div class="cal-7grid">${days.map(dStr => {
       const dt = new Date(dStr + 'T12:00:00');
       const dow = dt.toLocaleDateString('en-US', { weekday: 'short' });
       const dnum = dt.getDate();
@@ -1329,7 +1329,7 @@ async function viewCalendar(q = {}) {
     });
 
     const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    bodyHtml = `<div class="card tbl-wrap"><div class="cal-month-grid">
+    bodyHtml = `<div class="card"><div class="cal-month-grid">
       ${dows.map(w => `<div class="cal-m-dow">${w}</div>`).join('')}
       ${cells.map(c => {
         const list = byDay.get(c.str) || [];
