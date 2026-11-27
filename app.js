@@ -134,20 +134,72 @@ function formModal(title, fields, onSubmit, submitLabel = 'Save') {
 
 // ---------- PWA install (Android, Desktop & iOS) ----------
 let deferredInstallPrompt = null;
-const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+let relatedAppInstalled = false;
+const PWA_INSTALLED_KEY = 'sv_pwa_installed_v1';
+
+const isStandalone = () =>
+  window.matchMedia('(display-mode: standalone)').matches
+  || window.matchMedia('(display-mode: fullscreen)').matches
+  || window.matchMedia('(display-mode: minimal-ui)').matches
+  || window.navigator.standalone === true
+  || document.referrer.startsWith('android-app://');
+
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+if (isStandalone()) {
+  try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
+}
+
+function isAppInstalledOnDevice() {
+  if (isStandalone() || relatedAppInstalled) return true;
+  try {
+    if (isIOS() && localStorage.getItem(PWA_INSTALLED_KEY) === '1') return true;
+  } catch {}
+  return false;
+}
+
 function canShowInstall() {
-  return !isStandalone() && (!!deferredInstallPrompt || isIOS());
+  if (isAppInstalledOnDevice()) return false;
+  return !!deferredInstallPrompt || isIOS();
 }
 
 function updateInstallUI() {
+  const installed = isAppInstalledOnDevice();
   const show = canShowInstall();
   const topBtn = $('#btnInstall');
-  if (topBtn) topBtn.hidden = !show;
+  if (topBtn) {
+    if (installed) topBtn.remove();
+    else topBtn.hidden = !show;
+  }
   const loginBtn = $('#btnLoginInstall');
-  if (loginBtn) loginBtn.hidden = !show;
+  if (loginBtn) {
+    if (installed) loginBtn.remove();
+    else loginBtn.hidden = !show;
+  }
 }
+
+if (navigator.getInstalledRelatedApps) {
+  navigator.getInstalledRelatedApps()
+    .then(apps => {
+      if (Array.isArray(apps) && apps.length > 0) {
+        relatedAppInstalled = true;
+        try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
+        updateInstallUI();
+      }
+    })
+    .catch(() => {});
+}
+
+['standalone', 'fullscreen', 'minimal-ui'].forEach(mode => {
+  try {
+    window.matchMedia(`(display-mode: ${mode})`).addEventListener('change', e => {
+      if (e.matches) {
+        try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
+        updateInstallUI();
+      }
+    });
+  } catch {}
+});
 
 async function triggerInstall() {
   if (deferredInstallPrompt) {
@@ -155,6 +207,7 @@ async function triggerInstall() {
     const { outcome } = await deferredInstallPrompt.userChoice;
     if (outcome === 'accepted') {
       deferredInstallPrompt = null;
+      try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
       toast('Installing app…');
     }
     updateInstallUI();
@@ -169,14 +222,25 @@ async function triggerInstall() {
         <li>Scroll down and tap <b>Add to Home Screen</b>.</li>
         <li>Tap <b>Add</b> in the top-right corner.</li>
       </ol>
-      <div class="actions"><button class="btn pri" value="cancel">Got it</button></div>`;
+      <div class="actions">
+        <button type="button" class="btn" id="bIosAlready" style="margin-right:auto">Already installed</button>
+        <button class="btn pri" value="cancel">Got it</button>
+      </div>`;
     f.onsubmit = () => {};
+    $('#bIosAlready').onclick = () => {
+      try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
+      updateInstallUI();
+      dlg.close();
+    };
     dlg.showModal();
   }
 }
 
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
+  // If browser fires beforeinstallprompt, the app is not currently installed on this browser
+  try { localStorage.removeItem(PWA_INSTALLED_KEY); } catch {}
+  relatedAppInstalled = false;
   deferredInstallPrompt = e;
   updateInstallUI();
   hideSplash();
@@ -184,10 +248,13 @@ window.addEventListener('beforeinstallprompt', e => {
 
 window.addEventListener('appinstalled', () => {
   deferredInstallPrompt = null;
+  relatedAppInstalled = true;
+  try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch {}
   updateInstallUI();
   toast('App installed on your device');
 });
 
+updateInstallUI();
 $('#btnInstall') && ($('#btnInstall').onclick = triggerInstall);
 
 
@@ -1091,27 +1158,29 @@ async function viewDashboard(q) {
   const st = Object.fromEntries(s.byStatus.map(x => [x.status, x.n]));
   const total = s.byStatus.reduce((a, x) => a + x.n, 0);
   const maxTech = Math.max(1, ...s.byTech.map(t => t.done || 0));
+  const linkIf = (ok, href) => ok ? `class="click" data-href="${href}"` : '';
+
   app.innerHTML = `
   <div class="row between"><h1>Dashboard</h1>
     <form class="row" id="rng"><input type="date" name="from" value="${from}" style="width:auto"><span class="muted">to</span><input type="date" name="to" value="${to}" style="width:auto"><button class="btn sm">Apply</button></form></div>
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="kpi"><b>${s.open}</b><span>Open work orders now</span></div>
-    <div class="kpi ${s.overdue.length ? 'warn' : ''}"><b>${s.overdue.length}</b><span>Overdue preventives</span></div>
-    <div class="kpi"><b>${st.en_progreso || 0}</b><span>Technicians on site now</span></div>
-    <div class="kpi"><b>${st.completada || 0}</b><span>Completed in period (of ${total})</span></div>
-    <div class="kpi"><b>${fmtDur(s.times.avg_onsite)}</b><span>Avg. time on site</span></div>
-    <div class="kpi"><b>${fmtDur(s.times.avg_response)}</b><span>Avg. response time</span></div>
-    <div class="kpi"><b>${fmtDur(s.times.total_onsite)}</b><span>Technician hours on site</span></div>
-    <div class="kpi"><b>${s.upcoming}</b><span>Preventives due in next 30 days</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=pendiente,asignada,en_progreso"><b>${s.open}</b><span>Open work orders now</span></div>
+    <div class="kpi click ${s.overdue.length ? 'warn' : ''}" data-href="#/ordenes?type=preventivo&status=pendiente,asignada"><b>${s.overdue.length}</b><span>Overdue preventives</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=en_progreso"><b>${st.en_progreso || 0}</b><span>Technicians on site now</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=completada&from=${from}&to=${to}"><b>${st.completada || 0}</b><span>Completed in period (of ${total})</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=completada&from=${from}&to=${to}"><b>${fmtDur(s.times.avg_onsite)}</b><span>Avg. time on site</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=completada&from=${from}&to=${to}"><b>${fmtDur(s.times.avg_response)}</b><span>Avg. response time</span></div>
+    <div class="kpi click" data-href="#/ordenes?status=completada&from=${from}&to=${to}"><b>${fmtDur(s.times.total_onsite)}</b><span>Technician hours on site</span></div>
+    <div class="kpi ${can('plans') ? 'click' : ''}" ${can('plans') ? 'data-href="#/planes"' : ''}><b>${s.upcoming}</b><span>Preventives due in next 30 days</span></div>
   </div>
-  ${s.overdue.length ? `<div class="card"><h2>Overdue preventive maintenance</h2><table><thead><tr><th>WO</th><th>Client / unit</th><th>Technician</th><th>Was due</th></tr></thead><tbody>
+  ${s.overdue.length ? `<div class="card"><div class="row between"><h2 style="margin:0">Overdue preventive maintenance</h2>${can('plans') ? '<a class="link small" href="#/planes">View plans →</a>' : ''}</div><table><thead><tr><th>WO</th><th>Client / unit</th><th>Technician</th><th>Was due</th></tr></thead><tbody>
     ${s.overdue.map(o => `<tr class="click" data-id="${o.id}"><td><b>${otCode(o.id)}</b></td><td>${esc(o.client_name)}<div class="small muted">${esc(o.eq_location || '')}</div></td><td>${esc(o.technician_name || '—')}</td><td class="overdue">${fmtDT(o.scheduled_at)}</td></tr>`).join('')}</tbody></table></div>` : ''}
   <div class="grid g2">
-    <div class="card"><h2>By technician</h2>${s.byTech.length ? `<table><thead><tr><th>Technician</th><th>Closed</th><th>Open</th><th>Avg. on site</th></tr></thead><tbody>
+    <div class="card"><div class="row between"><h2 style="margin:0">By technician</h2>${can('users') ? '<a class="link small" href="#/usuarios">Users →</a>' : ''}</div>${s.byTech.length ? `<table><thead><tr><th>Technician</th><th>Closed</th><th>Open</th><th>Avg. on site</th></tr></thead><tbody>
       ${s.byTech.map(t => `<tr class="click" data-href="#/ordenes?technician_id=${t.id}"><td>${esc(t.name)}<div class="bar"><i style="width:${(t.done || 0) / maxTech * 100}%"></i></div></td><td>${t.done || 0}</td><td>${t.open || 0}</td><td>${fmtDur(t.avg_onsite)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No technicians yet. <a href="#/usuarios">Add technician</a></div>'}</div>
-    <div class="card"><h2>Most used parts</h2>${s.topParts.length ? `<table><thead><tr><th>Part</th><th>Qty</th><th>Cost</th></tr></thead><tbody>${s.topParts.map(p => `<tr><td>${esc(p.name)}</td><td>${p.qty} ${esc(p.unit)}</td><td>${money(p.cost)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No parts used in this period.</div>'}</div>
-    <div class="card"><h2>Top clients by work orders</h2>${s.byClient.length ? `<table><thead><tr><th>Client</th><th>Orders</th><th>Parts</th></tr></thead><tbody>${s.byClient.map(c => `<tr><td>${esc(c.name)}</td><td>${c.n}</td><td>${money(c.parts_cost)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No work orders in this period.</div>'}</div>
-    <div class="card"><h2>Low stock</h2>${s.lowStock.length ? `<table><thead><tr><th>Part</th><th>Stock</th><th>Minimum</th></tr></thead><tbody>${s.lowStock.map(p => `<tr><td>${esc(p.name)}</td><td class="overdue">${p.stock} ${esc(p.unit)}</td><td>${p.min_stock}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">All inventory is above minimum.</div>'}</div>
+    <div class="card"><div class="row between"><h2 style="margin:0">Most used parts</h2>${can('parts') ? '<a class="link small" href="#/repuestos">Parts →</a>' : ''}</div>${s.topParts.length ? `<table><thead><tr><th>Part</th><th>Qty</th><th>Cost</th></tr></thead><tbody>${s.topParts.map(p => `<tr ${linkIf(can('parts'), '#/repuestos')}><td>${esc(p.name)}</td><td>${p.qty} ${esc(p.unit)}</td><td>${money(p.cost)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No parts used in this period.</div>'}</div>
+    <div class="card"><div class="row between"><h2 style="margin:0">Top clients by work orders</h2>${can('clients') ? '<a class="link small" href="#/clientes">Clients →</a>' : ''}</div>${s.byClient.length ? `<table><thead><tr><th>Client</th><th>Orders</th><th>Parts</th></tr></thead><tbody>${s.byClient.map(c => `<tr ${linkIf(can('clients'), '#/clientes')}><td>${esc(c.name)}</td><td>${c.n}</td><td>${money(c.parts_cost)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No work orders in this period.</div>'}</div>
+    <div class="card"><div class="row between"><h2 style="margin:0">Low stock</h2>${can('parts') ? '<a class="link small" href="#/repuestos">Inventory →</a>' : ''}</div>${s.lowStock.length ? `<table><thead><tr><th>Part</th><th>Stock</th><th>Minimum</th></tr></thead><tbody>${s.lowStock.map(p => `<tr ${linkIf(can('parts'), '#/repuestos')}><td>${esc(p.name)}</td><td class="overdue">${p.stock} ${esc(p.unit)}</td><td>${p.min_stock}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">All inventory is above minimum.</div>'}</div>
   </div>`;
   $('#rng').onsubmit = e => { e.preventDefault(); const d = new FormData(e.target); location.hash = `#/?from=${d.get('from')}&to=${d.get('to')}`; };
   app.querySelectorAll('[data-href]').forEach(r => r.onclick = () => location.hash = r.dataset.href);

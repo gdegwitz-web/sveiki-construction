@@ -377,6 +377,7 @@ tr.click:hover td { background: var(--sky-soft); }
   background: linear-gradient(90deg, var(--navy) 0%, var(--pri) 60%, var(--sky) 100%);
 }
 
+.kpi.click { cursor: pointer; }
 .kpi:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(31, 40, 89, 0.1);
