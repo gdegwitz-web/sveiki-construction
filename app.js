@@ -36,6 +36,7 @@ const PHOTO_KIND = { diagnostico: 'Diagnosis', antes: 'Before', despues: 'After'
 const FREQ = [[30, 'Monthly (30 days)'], [60, 'Every 2 months (60 days)'], [90, 'Quarterly (90 days)'], [120, 'Every 4 months (120 days)'], [180, 'Semiannual (180 days)'], [365, 'Annual (365 days)']];
 const badgeSt = s => `<span class="badge st-${s}">${ST[s] || s}</span>`;
 const badgePr = p => `<span class="badge pr-${p}">${PR[p] || p}</span>`;
+const badgeOff = v => v ? '<span class="badge st-offhours">🌙 Off Hours</span>' : '';
 
 function toast(msg, err) {
   const t = $('#toast'); t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
@@ -780,7 +781,7 @@ async function viewTechHome() {
 function orderCard(o) {
   const eq = [o.eq_location, o.eq_brand, o.eq_btu && o.eq_btu + ' BTU'].filter(Boolean).join(' · ');
   return `<div class="oitem p-${o.priority}" data-id="${o.id}">
-    <div class="row between"><span class="t">${esc(o.client_name)}</span><span>${badgeSt(o.status)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</span></div>
+    <div class="row between"><span class="t">${esc(o.client_name)}</span><span>${badgeSt(o.status)} ${badgeOff(o.off_hours)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</span></div>
     <div class="small muted">${otCode(o.id)} · ${TYPE[o.type]}${eq ? ' · ' + esc(eq) : ''}${o.estimated_minutes ? ' · ⏱ ~' + fmtDur(o.estimated_minutes) : ''}</div>
     ${o.reported_issue ? `<div style="margin-top:6px">${esc(o.reported_issue)}</div>` : ''}
     <div class="small ${isOverdue(o) ? 'overdue' : 'muted'}" style="margin-top:6px">${o.status === 'en_progreso' ? '⏱ On site since ' + fmtT(o.arrival_at)
@@ -866,7 +867,7 @@ function renderOrder(o, partsCat, cfg = S.settings || {}) {
     <div class="row">${full ? '<button class="btn sm" id="bEdit">Edit order</button>' : ''}${can('reports') ? `<a class="btn sm" href="#/reporte/${o.id}">📄 Client report</a>` : ''}</div>
   </div>
   <div class="card">
-    <div class="row between"><h1 style="margin:0">${otCode(o.id)}</h1><div class="row">${badgeSt(o.status)}${badgePr(o.priority)}<span class="badge">${TYPE[o.type]}</span>${o.plan_id ? '<span class="badge">Plan</span>' : ''}</div></div>
+    <div class="row between"><h1 style="margin:0">${otCode(o.id)}</h1><div class="row">${badgeSt(o.status)}${badgeOff(o.off_hours)}${badgePr(o.priority)}<span class="badge">${TYPE[o.type]}</span>${o.plan_id ? '<span class="badge">Plan</span>' : ''}</div></div>
     ${isOverdue(o) ? `<div class="alert">⚠ Overdue — was scheduled for ${fmtDT(o.scheduled_at)}</div>` : ''}
     <div class="grid g2" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
       <div><h3>Client</h3><b>${esc(o.client_name)}</b>${o.client_address ? `<div class="small muted">${esc(o.client_address)} · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${encodeURIComponent(o.client_address)}">Directions</a></div>` : ''}
@@ -1095,7 +1096,7 @@ async function viewReport(id) {
     <div class="rgrid">
       <div><h3>Client</h3><b>${esc(o.client_name)}</b><div>${esc(o.client_address || '')}</div>${o.contact_name ? `<div>${esc(o.contact_name)} ${esc(o.contact_phone || '')}</div>` : ''}</div>
       <div><h3>Unit</h3>${o.equipment_id ? `<b>${esc(o.eq_location)}</b><div>${esc(eq)}</div>${o.eq_serial ? `<div>S/N ${esc(o.eq_serial)}</div>` : ''}` : '—'}</div>
-      <div><h3>Service</h3><div>${TYPE[o.type]} · ${ST[o.status]}</div><div>Technician: ${esc(o.technician_name || '—')}</div></div>
+      <div><h3>Service</h3><div>${TYPE[o.type]} · ${ST[o.status]}${o.off_hours ? ' · <b>Off Hours</b>' : ''}</div><div>Technician: ${esc(o.technician_name || '—')}</div></div>
     </div>
     <table class="rtimes"><tr><th>Arrival</th><th>Departure</th><th>Time on site</th></tr>
       <tr><td>${o.arrival_at ? fmtDT(o.arrival_at) : '—'}</td><td>${o.departure_at ? fmtDT(o.departure_at) : '—'}</td><td>${o.arrival_at ? fmtDur(mins(o.arrival_at, o.departure_at)) : '—'}</td></tr></table>
@@ -1134,6 +1135,7 @@ async function editOrderModal(o) {
     { name: 'type', label: 'Type', type: 'select', value: o.type, options: [['correctivo', 'Corrective (repair)'], ['preventivo', 'Preventive']], half: true,
       onchange: (e, f) => { if (f.elements.checklist_id) f.elements.checklist_id.value = defaultCk(e.target.value); } },
     { name: 'priority', label: 'Priority', type: 'select', value: o.priority, options: Object.entries(PR), half: true },
+    { name: 'off_hours', label: 'Off Hours', type: 'select', value: o.off_hours ? '1' : '0', options: [['0', 'Regular hours'], ['1', '🌙 Off Hours']], half: true },
     { name: 'technician_id', label: 'Assigned technician', type: 'select', value: o.technician_id, options: [['', '— Unassigned —'], ...techs.map(u => [u.id, u.name])] },
     { name: 'scheduled_at', label: 'Scheduled date/time', type: 'datetime-local', value: toLocalInput(o.scheduled_at) },
   ];
@@ -1200,6 +1202,7 @@ async function viewOrders(q) {
     <select name="status" style="flex:1;min-width:130px">${opt([['', 'All statuses'], ['pendiente,asignada,en_progreso', 'Open'], ...Object.entries(ST)], q.status)}</select>
     <select name="type" style="flex:1;min-width:120px">${opt([['', 'All types'], ['correctivo', 'Corrective'], ['preventivo', 'Preventive']], q.type)}</select>
     <select name="priority" style="flex:1;min-width:120px">${opt([['', 'All priorities'], ...Object.entries(PR)], q.priority)}</select>
+    <select name="off_hours" style="flex:1;min-width:130px">${opt([['', 'Regular & Off Hours'], ['1', '🌙 Off Hours only'], ['0', 'Regular hours only']], q.off_hours)}</select>
     <select name="technician_id" style="flex:1;min-width:140px">${opt([['', 'All technicians'], ...users.map(u => [u.id, u.name])], q.technician_id)}</select>
     <select name="client_id" style="flex:1;min-width:140px">${opt([['', 'All clients'], ...clients.map(c => [c.id, c.name])], q.client_id)}</select>
     <input type="date" name="from" value="${q.from || ''}" style="width:auto" title="From"><input type="date" name="to" value="${q.to || ''}" style="width:auto" title="To">
@@ -1210,7 +1213,7 @@ async function viewOrders(q) {
   <div class="card tbl-wrap">${list.length ? `<table><thead><tr><th>WO</th><th>Client / unit</th><th>Technician</th><th>Status</th><th class="hide-m">Scheduled / arrival</th><th class="hide-m">On site</th><th class="hide-m">Photos</th><th class="hide-m">Parts</th></tr></thead><tbody>
     ${list.map(o => `<tr class="click" data-id="${o.id}"><td><b>${otCode(o.id)}</b><div class="small muted">${fmtD(o.created_at)}</div></td>
       <td>${esc(o.client_name)}<div class="small muted">${esc(o.eq_location || '')} ${o.type === 'preventivo' ? '· Preventive' : ''}</div></td>
-      <td>${esc(o.technician_name || '—')}</td><td>${badgeSt(o.status)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</td>
+      <td>${esc(o.technician_name || '—')}</td><td>${badgeSt(o.status)} ${badgeOff(o.off_hours)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</td>
       <td class="hide-m ${isOverdue(o) ? 'overdue' : ''}">${o.arrival_at ? fmtDT(o.arrival_at) : o.scheduled_at ? (isOverdue(o) ? '⚠ ' : '📅 ') + fmtDT(o.scheduled_at) : '—'}</td><td class="hide-m">${o.arrival_at ? fmtDur(mins(o.arrival_at, o.departure_at)) : '—'}</td>
       <td class="hide-m">${o.photo_count}</td><td class="hide-m">${money(o.parts_cost)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No work orders match these filters.</div>'}</div>`;
   $('#bNew') && ($('#bNew').onclick = run(() => editOrderModal(null)));
@@ -1892,6 +1895,24 @@ async function viewSettings() {
       </table>
     </div>
 
+    <hr style="border:0;border-top:1px solid var(--line);margin:18px 0">
+    <h2>Off Hours Schedule</h2>
+    <p class="muted small" style="margin-top:-6px">Define regular business days and hours. Work orders outside this schedule (such as nights, early mornings, or non-working days) are flagged as <b>Off Hours</b>.</p>
+    <div class="field">
+      <label>Regular business days (unchecked days are treated as Off Hours)</label>
+      <div class="days-grid">${(() => {
+        const activeDays = new Set(String(s.offhours_days ?? '1,2,3,4,5').split(',').map(x => x.trim()));
+        return [['1', 'Mon'], ['2', 'Tue'], ['3', 'Wed'], ['4', 'Thu'], ['5', 'Fri'], ['6', 'Sat'], ['0', 'Sun']]
+          .map(([val, lbl]) => `<label class="day-chip"><input type="checkbox" data-ohday="${val}" ${activeDays.has(val) ? 'checked' : ''}><span>${lbl}</span></label>`)
+          .join('');
+      })()}</div>
+    </div>
+    <div class="grid g2" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+      <div class="field"><label>Regular hours start</label><input type="time" name="offhours_start" value="${esc(s.offhours_start || '08:00')}"></div>
+      <div class="field"><label>Regular hours end</label><input type="time" name="offhours_end" value="${esc(s.offhours_end || '17:00')}"></div>
+      <div class="field"><label>Auto-detect Off Hours on orders</label><select name="offhours_auto_detect"><option value="1" ${(s.offhours_auto_detect ?? '1') !== '0' ? 'selected' : ''}>Yes (auto-flag outside schedule)</option><option value="0" ${s.offhours_auto_detect === '0' ? 'selected' : ''}>No (manual selection only)</option></select></div>
+    </div>
+
     <button class="btn pri">Save settings</button>
   </form>
   <div class="card"><h2>Logo</h2>
@@ -1904,6 +1925,8 @@ async function viewSettings() {
     $('#sf').querySelectorAll('[data-fsec]').forEach(cb => {
       data[cb.dataset.fsec] = cb.checked ? '1' : '0';
     });
+    const ohDays = [...$('#sf').querySelectorAll('[data-ohday]:checked')].map(cb => cb.dataset.ohday);
+    data.offhours_days = ohDays.join(',');
     await api('PUT', '/api/settings', data);
     toast('Settings saved');
     S.settings = null;

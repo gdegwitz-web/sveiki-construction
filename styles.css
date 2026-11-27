@@ -1166,3 +1166,36 @@ body.auth-mode {
   border-color: var(--pri);
   box-shadow: inset 0 0 0 1px var(--pri);
 }
+
+
+.badge.st-offhours {
+  background: var(--info-bg);
+  color: var(--info);
+  border: 1px solid #cfd4f5;
+}
+.days-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.day-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--navy);
+  cursor: pointer;
+  margin: 0;
+}
+.day-chip input[type=checkbox] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--pri);
+}

@@ -35,6 +35,11 @@ const DEFAULT_SETTINGS = {
   field_show_recommendations: '1',
   field_show_received_by: '0',
   field_show_signature: '0',
+  // Off Hours schedule: regular business days (0=Sun..6=Sat) & regular shift window
+  offhours_days: '1,2,3,4,5',
+  offhours_start: '08:00',
+  offhours_end: '17:00',
+  offhours_auto_detect: '1',
 };
 
 const CATALOGS = {
@@ -258,12 +263,48 @@ export async function createBackend(config) {
     return { ...DEFAULT_SETTINGS, ...(s.exists() ? s.data() : {}) };
   }
 
+  function parseHM(hm, fallbackMin) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || '').trim());
+    if (!m) return fallbackMin;
+    const h = Number(m[1]), min = Number(m[2]);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return fallbackMin;
+    return h * 60 + min;
+  }
+
+  function computeOffHours(dateLike, cfg) {
+    const d = dateLike ? new Date(dateLike) : new Date();
+    if (isNaN(d)) return false;
+    const dayStr = String(cfg?.offhours_days ?? '1,2,3,4,5');
+    const allowedDays = new Set(dayStr.split(',').map(x => Number(x.trim())).filter(n => Number.isInteger(n) && n >= 0 && n <= 6));
+    if (!allowedDays.has(d.getDay())) return true;
+
+    const startMin = parseHM(cfg?.offhours_start, 8 * 60);
+    const endMin = parseHM(cfg?.offhours_end, 17 * 60);
+    const curMin = d.getHours() * 60 + d.getMinutes();
+
+    if (endMin > startMin) {
+      return curMin < startMin || curMin >= endMin;
+    }
+    if (endMin < startMin) {
+      return curMin >= endMin && curMin < startMin;
+    }
+    return false;
+  }
+
+  function parseBoolFlag(v) {
+    if (typeof v === 'boolean') return v;
+    if (v === 1 || v === '1' || v === 'true') return true;
+    if (v === 0 || v === '0' || v === 'false') return false;
+    return undefined;
+  }
+
   function normOrder(snap) {
     const d = snap.data();
     const o = { ...d, id: Number(snap.id) };
     for (const k of TS_FIELDS) o[k] = iso(d[k]);
     o.parts = (d.parts || []).map(p => ({ ...p }));
     o.photos = (d.photos || []).map(p => ({ ...p }));
+    o.off_hours = !!d.off_hours;
     o.parts_cost = o.parts.reduce((s, p) => s + (Number(p.qty) || 0) * (Number(p.unit_cost) || 0), 0);
     o.photo_count = o.photos.length;
     return o;
@@ -354,15 +395,22 @@ export async function createBackend(config) {
       'arrival_at', 'arrival_lat', 'arrival_lng', 'departure_at', 'departure_lat', 'departure_lng',
       'diagnosis', 'work_done', 'recommendations', 'received_by', 'checklist', 'signed_at', 'plan_id', 'updated_at',
     ].forEach(k => o[k] = null);
-    return Object.assign(o, { parts: [], photos: [], has_signature: false });
+    return Object.assign(o, { off_hours: false, parts: [], photos: [], has_signature: false });
   }
 
   async function buildOrder(b) {
+    const cfg = await settingsDoc();
+    const explicitOff = parseBoolFlag(b.off_hours);
+    const refDate = b.scheduled_at || new Date().toISOString();
+    const offHours = explicitOff !== undefined
+      ? explicitOff
+      : (cfg.offhours_auto_detect !== '0' ? computeOffHours(refDate, cfg) : false);
     return {
       ...emptyOrder(),
       ...(await denorm({ client_id: b.client_id, equipment_id: b.equipment_id || null, technician_id: b.technician_id || null })),
       type: b.type || 'correctivo',
       priority: b.priority || 'media',
+      off_hours: offHours,
       status: b.technician_id ? 'asignada' : 'pendiente',
       reported_issue: blank(b.reported_issue),
       scheduled_at: toTs(b.scheduled_at),
@@ -409,6 +457,8 @@ export async function createBackend(config) {
       && (!q.technician_id || o.technician_id === q.technician_id)
       && (!q.client_id || o.client_id === q.client_id)
       && (!q.equipment_id || o.equipment_id === q.equipment_id)
+      && (q.off_hours !== '1' || !!o.off_hours)
+      && (q.off_hours !== '0' || !o.off_hours)
       && (!from || new Date(o.created_at || Date.now()) >= from)
       && (!to || new Date(o.created_at || Date.now()) <= to)
       && (!term || [
@@ -1011,6 +1061,13 @@ export async function createBackend(config) {
           upd[k] = k === 'status' || k === 'type' || k === 'priority' ? b[k] : (b[k] ?? null);
         }
       });
+      const explicitOff = parseBoolFlag(b.off_hours);
+      if (explicitOff !== undefined) {
+        upd.off_hours = explicitOff;
+      } else if ('scheduled_at' in b && b.scheduled_at) {
+        const cfg = await settingsDoc();
+        if (cfg.offhours_auto_detect !== '0') upd.off_hours = computeOffHours(b.scheduled_at, cfg);
+      }
       ['scheduled_at', 'arrival_at', 'departure_at'].forEach(k => {
         if (k in b && b[k] !== undefined) upd[k] = toTs(b[k]);
       });
@@ -1110,6 +1167,7 @@ export async function createBackend(config) {
     assertWork(o);
     if (o.arrival_at) throw new ApiError('Arrival already recorded');
     if (isClosed(o)) throw new ApiError('This work order is closed');
+    const cfg = await settingsDoc();
     const upd = {
       arrival_at: serverTimestamp(),
       arrival_lat: b.lat ?? null,
@@ -1117,6 +1175,9 @@ export async function createBackend(config) {
       status: 'en_progreso',
       updated_at: serverTimestamp(),
     };
+    if (cfg.offhours_auto_detect !== '0' && !o.off_hours) {
+      upd.off_hours = computeOffHours(new Date(), cfg);
+    }
     if (!o.technician_id) Object.assign(upd, { technician_id: me.id, technician_name: me.name });
     await updateDoc(ref('orders', o.id), upd);
     return getOrderFull(o.id);
