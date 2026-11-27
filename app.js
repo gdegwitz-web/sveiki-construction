@@ -1818,23 +1818,118 @@ async function viewEquipment(q) {
 }
 
 async function viewParts() {
-  const rows = await api('GET', '/api/parts?all=1');
-  const form = r => formModal(r ? 'Edit part' : 'New part', [
-    { name: 'name', label: 'Name', required: true, value: r?.name, placeholder: 'E.g. Capacitor 35/5 µF' },
-    { name: 'code', label: 'Code', value: r?.code, half: true },
-    { name: 'unit', label: 'Unit of measure', type: 'select', value: r?.unit || 'ea', options: [['ea', 'Each'], ['lb', 'Pound (refrigerant)'], ['kg', 'Kg'], ['m', 'Meter'], ['ft', 'Foot'], ['L', 'Liter'], ['set', 'Set']], half: true },
-    { name: 'cost', label: 'Unit cost (USD)', type: 'number', step: '0.01', value: r?.cost ?? 0, half: true },
-    { name: 'stock', label: 'Current stock', type: 'number', step: '0.01', value: r?.stock ?? 0, half: true, help: 'Deducted automatically when used on a work order' },
-    { name: 'min_stock', label: 'Minimum stock (alert)', type: 'number', step: '0.01', value: r?.min_stock ?? 0 },
-    ...(r ? [activeField(r)] : []),
-  ], saveCat('parts', r, viewParts));
-  catalogView({
-    title: 'Parts & inventory', rows, editable: can('parts', 2), onNew: () => form(), onEdit: form,
-    cols: [{ h: 'Part', f: r => `<b>${esc(r.name)}</b>${r.code ? `<div class="small muted">${esc(r.code)}</div>` : ''}` },
-      { h: 'Stock', f: r => `<span class="${+r.stock <= +r.min_stock ? 'overdue' : ''}">${r.stock} ${esc(r.unit)}</span>` },
-      { h: 'Min.', cls: 'hide-m', f: r => r.min_stock },
-      { h: 'Cost', f: r => money(r.cost) }],
-  });
+  const canManageParts = can('parts', 2);
+  const [rows, movements] = await Promise.all([
+    api('GET', '/api/parts?all=1'),
+    api('GET', '/api/stock-movements').catch(() => []),
+  ]);
+
+  const openStockModal = (r) => {
+    if (!canManageParts) return toast('Only Master users can add or adjust inventory', true);
+    formModal(`Add / adjust stock · ${r.name}`, [
+      { type: 'html', html: `<p class="small muted" style="margin-top:-6px">Current stock: <b>${esc(r.stock)} ${esc(r.unit)}</b> · Minimum alert: <b>${esc(r.min_stock)} ${esc(r.unit)}</b></p>` },
+      { name: 'mode', label: 'Action', type: 'select', value: 'add', options: [['add', '+ Add inventory stock (restock)'], ['sub', '− Deduct / manual adjustment']] },
+      { name: 'qty', label: `Quantity (${r.unit})`, type: 'number', step: '0.01', min: '0.01', required: true, value: '1', placeholder: 'E.g. 10' },
+      { name: 'note', label: 'Note / reference (optional)', value: '', placeholder: 'E.g. Supplier invoice #402 / Warehouse restock' },
+    ], async d => {
+      const qVal = Number(d.qty);
+      if (!Number.isFinite(qVal) || qVal <= 0) throw new Error('Enter a valid quantity greater than 0');
+      const delta = d.mode === 'sub' ? -qVal : qVal;
+      await api('POST', `/api/parts/${r.id}/adjust`, { delta, note: d.note });
+      delete S.cache.parts;
+      toast(delta > 0 ? `Added ${qVal} ${r.unit} to ${r.name}` : `Adjusted ${qVal} ${r.unit} on ${r.name}`);
+      viewParts();
+    }, 'Update stock');
+  };
+
+  const form = r => {
+    if (!canManageParts) return toast('Only Master users can add or edit parts', true);
+    formModal(r ? 'Edit part' : 'New part', [
+      { name: 'name', label: 'Name', required: true, value: r?.name, placeholder: 'E.g. Capacitor 35/5 µF' },
+      { name: 'code', label: 'Code', value: r?.code, half: true },
+      { name: 'unit', label: 'Unit of measure', type: 'select', value: r?.unit || 'ea', options: [['ea', 'Each'], ['lb', 'Pound (refrigerant)'], ['kg', 'Kg'], ['m', 'Meter'], ['ft', 'Foot'], ['L', 'Liter'], ['set', 'Set']], half: true },
+      { name: 'cost', label: 'Unit cost (USD)', type: 'number', step: '0.01', value: r?.cost ?? 0, half: true },
+      { name: 'stock', label: 'Current stock', type: 'number', step: '0.01', value: r?.stock ?? 0, half: true, help: 'Deducted automatically when used on a work order' },
+      { name: 'min_stock', label: 'Minimum stock (alert)', type: 'number', step: '0.01', value: r?.min_stock ?? 0 },
+      ...(r ? [activeField(r)] : []),
+    ], saveCat('parts', r, viewParts));
+  };
+
+  const lowCount = rows.filter(r => r.active !== 0 && r.active !== false && +r.stock <= +r.min_stock).length;
+  const kindLabel = m => m.kind === 'master_add' ? '<span class="badge st-completada">+ Restock (Master)</span>'
+    : m.kind === 'master_adjust' ? '<span class="badge st-pendiente">Adjustment (Master)</span>'
+    : m.kind === 'order_return' ? '<span class="badge st-asignada">↩ Returned from WO</span>'
+    : '<span class="badge st-en_progreso">🔧 Used on WO</span>';
+
+  app.innerHTML = `
+    <div class="row between">
+      <h1>Parts &amp; Inventory</h1>
+      <div class="row">
+        ${!canManageParts ? '<span class="badge">Master adds stock · Auto-deducted on orders</span>' : '<button class="btn pri" id="bNew">+ New part</button>'}
+      </div>
+    </div>
+
+    <div class="card row" id="partsFilterBar">
+      <input type="search" id="pfSearch" placeholder="Search part name or code…" style="flex:2;min-width:180px">
+      <select id="pfStock" style="flex:1;min-width:150px">
+        <option value="all">All parts (${rows.length})</option>
+        <option value="low">Low stock alert (${lowCount})</option>
+      </select>
+    </div>
+
+    <div class="card tbl-wrap">${rows.length ? `<table id="partsTbl"><thead><tr><th>Part</th><th>Stock</th><th class="hide-m">Min.</th><th class="hide-m">Cost</th><th></th></tr></thead><tbody>
+      ${rows.map((r, i) => {
+        const isLow = +r.stock <= +r.min_stock;
+        const qStr = esc(`${r.name || ''} ${r.code || ''}`.toLowerCase());
+        return `<tr class="${canManageParts ? 'click' : ''}" data-i="${i}" data-q="${qStr}" data-low="${isLow ? '1' : '0'}" style="${r.active === 0 || r.active === false ? 'opacity:.5' : ''}">
+          <td><b>${esc(r.name)}</b>${r.code ? ` <span class="small muted">${esc(r.code)}</span>` : ''}${isLow ? ' <span class="badge pr-urgente">Low stock</span>' : ''}</td>
+          <td><b class="${isLow ? 'overdue' : ''}">${esc(r.stock)} ${esc(r.unit)}</b></td>
+          <td class="hide-m">${esc(r.min_stock)}</td>
+          <td class="hide-m">${money(r.cost)}</td>
+          <td>${canManageParts ? `<button type="button" class="btn sm ok" data-addstock="${esc(r.id)}">+ Stock</button>` : ''}</td>
+        </tr>`;
+      }).join('')}
+    </tbody></table>` : '<div class="empty">No parts registered yet.</div>'}</div>
+
+    <div class="card">
+      <h2>Inventory Movement Log</h2>
+      <p class="small muted" style="margin-top:-6px">Tracks inventory additions by Master users and automatic deductions when technicians use parts on work orders.</p>
+      ${movements.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Part</th><th>Type</th><th>Change</th><th class="hide-m">Stock</th><th class="hide-m">By / Order</th></tr></thead><tbody>
+        ${movements.slice(0, 40).map(m => {
+          const dVal = Number(m.delta) || 0;
+          const sign = dVal > 0 ? '+' : '';
+          return `<tr>
+            <td class="small muted">${fmtDT(m.created_at)}</td>
+            <td><b>${esc(m.part_name)}</b>${m.part_code ? ` <span class="small muted">${esc(m.part_code)}</span>` : ''}${m.note ? `<div class="small muted">${esc(m.note)}</div>` : ''}</td>
+            <td>${kindLabel(m)}</td>
+            <td><b class="${dVal < 0 ? 'overdue' : 'small'}" style="${dVal > 0 ? 'color:var(--ok)' : ''}">${sign}${dVal} ${esc(m.unit || '')}</b></td>
+            <td class="hide-m small">${m.stock_before != null && m.stock_after != null ? `${esc(m.stock_before)} → <b>${esc(m.stock_after)}</b>` : '—'}</td>
+            <td class="hide-m small">${esc(m.user_name || '—')}${m.order_id ? ` · <a class="link" href="#/orden/${m.order_id}">${otCode(m.order_id)}</a>` : ''}</td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>` : '<div class="empty">No inventory movements recorded yet.</div>'}
+    </div>
+  `;
+
+  if (canManageParts) {
+    $('#bNew').onclick = run(() => form());
+    app.querySelectorAll('tr.click[data-i]').forEach(tr => tr.onclick = run(() => form(rows[tr.dataset.i])));
+    app.querySelectorAll('[data-addstock]').forEach(btn => btn.onclick = run(async ev => {
+      ev.stopPropagation();
+      const part = rows.find(x => x.id === btn.dataset.addstock);
+      if (part) openStockModal(part);
+    }));
+  }
+
+  const filterParts = () => {
+    const q = ($('#pfSearch')?.value || '').trim().toLowerCase();
+    const lowOnly = $('#pfStock')?.value === 'low';
+    app.querySelectorAll('#partsTbl tbody tr').forEach(tr => {
+      tr.hidden = !!((q && !tr.dataset.q.includes(q)) || (lowOnly && tr.dataset.low !== '1'));
+    });
+  };
+  $('#pfSearch')?.addEventListener('input', filterParts);
+  $('#pfStock')?.addEventListener('change', filterParts);
 }
 
 // Checklist items are edited as text, one per line:  "Label"  |  "Label | number | psi"  |  "Label | text"

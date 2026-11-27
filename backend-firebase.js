@@ -1224,6 +1224,8 @@ export async function createBackend(config) {
       if (!can('orders', 2) && (await settingsDoc()).field_show_parts === '0') {
         throw new ApiError('Parts section is disabled for field technicians', 403);
       }
+      const prevStock = Number(part.stock) || 0;
+      const nextStock = Number((prevStock - qty).toFixed(2));
       const line = {
         id: rid(),
         part_id: ps.id,
@@ -1236,8 +1238,24 @@ export async function createBackend(config) {
         added_by_name: me.name,
         created_at: new Date().toISOString(),
       };
+      const mvRef = doc(col('stock_movements'));
       tx.update(os.ref, { parts: [...(o.parts || []), line], updated_at: serverTimestamp() });
-      tx.update(ps.ref, { stock: Number(((Number(part.stock) || 0) - qty).toFixed(2)) });
+      tx.update(ps.ref, { stock: nextStock });
+      tx.set(mvRef, {
+        part_id: ps.id,
+        part_name: part.name,
+        part_code: part.code || null,
+        unit: part.unit || 'ea',
+        delta: -qty,
+        qty,
+        stock_before: prevStock,
+        stock_after: nextStock,
+        kind: 'order_use',
+        order_id: Number(os.id),
+        user_id: me.id,
+        user_name: me.name,
+        created_at: serverTimestamp(),
+      });
     });
     return getOrderFull(p.id);
   });
@@ -1253,7 +1271,27 @@ export async function createBackend(config) {
       const ps = await tx.get(ref('parts', line.part_id));
       tx.update(os.ref, { parts: o.parts.filter(x => x.id !== p.pid), updated_at: serverTimestamp() });
       if (ps.exists()) {
-        tx.update(ps.ref, { stock: Number(((Number(ps.data().stock) || 0) + Number(line.qty)).toFixed(2)) });
+        const pData = ps.data();
+        const prevStock = Number(pData.stock) || 0;
+        const addedQty = Number(line.qty) || 0;
+        const nextStock = Number((prevStock + addedQty).toFixed(2));
+        const mvRef = doc(col('stock_movements'));
+        tx.update(ps.ref, { stock: nextStock });
+        tx.set(mvRef, {
+          part_id: ps.id,
+          part_name: pData.name || line.name,
+          part_code: pData.code || line.code || null,
+          unit: pData.unit || line.unit || 'ea',
+          delta: addedQty,
+          qty: addedQty,
+          stock_before: prevStock,
+          stock_after: nextStock,
+          kind: 'order_return',
+          order_id: Number(os.id),
+          user_id: me.id,
+          user_name: me.name,
+          created_at: serverTimestamp(),
+        });
       }
     });
     return getOrderFull(p.id);
@@ -1418,6 +1456,46 @@ export async function createBackend(config) {
     sigCache.clear();
 
     return { ok: true, counts };
+  });
+
+
+  R('POST', '/api/parts/:id/adjust', async (p, b) => {
+    need('parts', 2);
+    const delta = Number(b.delta);
+    if (!Number.isFinite(delta) || delta === 0) throw new ApiError('Enter a non-zero quantity to add or adjust stock');
+    const note = blank(b.note);
+    await runTransaction(db, async tx => {
+      const ps = await tx.get(ref('parts', p.id));
+      if (!ps.exists()) throw new ApiError('Part not found', 404);
+      const part = ps.data();
+      const prevStock = Number(part.stock) || 0;
+      const nextStock = Number((prevStock + delta).toFixed(2));
+      if (nextStock < 0) throw new ApiError('Stock cannot be negative');
+      const mvRef = doc(col('stock_movements'));
+      tx.update(ps.ref, { stock: nextStock });
+      tx.set(mvRef, {
+        part_id: ps.id,
+        part_name: part.name,
+        part_code: part.code || null,
+        unit: part.unit || 'ea',
+        delta,
+        qty: Math.abs(delta),
+        stock_before: prevStock,
+        stock_after: nextStock,
+        kind: delta > 0 ? 'master_add' : 'master_adjust',
+        note,
+        user_id: me.id,
+        user_name: me.name,
+        created_at: serverTimestamp(),
+      });
+    });
+    return { ok: true };
+  });
+
+  R('GET', '/api/stock-movements', async () => {
+    need('parts');
+    const snap = await getDocs(query(col('stock_movements'), orderBy('created_at', 'desc'), limit(150)));
+    return snap.docs.map(d => ({ id: d.id, ...d.data(), created_at: iso(d.data().created_at) }));
   });
 
   R('GET', '/api/stats', async (p, b, q) => stats(q));
