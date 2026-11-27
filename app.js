@@ -648,6 +648,7 @@ function renderNav() {
   const links = [
     can('dashboard') && can('orders') && ['#/', 'Dashboard'],
     can('orders') && ['#/ordenes', 'Work orders'],
+    (can('orders') || can('field', 2)) && ['#/calendario', 'Calendar'],
     can('field', 2) && [can('dashboard') && can('orders') ? '#/mis' : '#/', 'My work orders'],
     can('plans') && ['#/planes', 'Preventive plans'],
     can('clients') && ['#/clientes', 'Clients'],
@@ -752,6 +753,7 @@ async function route() {
           if (first) { location.hash = '#/' + first[0]; return; } }
         app.innerHTML = '<div class="card empty">Your profile has no modules enabled. Contact the administrator.</div>'; return;
       case 'mis': guard(can('field', 2)); return await viewTechHome();
+      case 'calendario': guard(can('orders') || can('field', 2)); return await viewCalendar(q);
       case 'ordenes': guard(can('orders')); return await viewOrders(q);
       case 'planes': guard(can('plans')); return await viewPlans();
       case 'clientes': guard(can('clients')); return await viewClients();
@@ -1186,6 +1188,213 @@ async function viewDashboard(q) {
   </div>`;
   $('#rng').onsubmit = e => { e.preventDefault(); const d = new FormData(e.target); location.hash = `#/?from=${d.get('from')}&to=${d.get('to')}`; };
   app.querySelectorAll('[data-href]').forEach(r => r.onclick = () => location.hash = r.dataset.href);
+  bindOrderCards();
+}
+
+
+// ================= Schedule Calendar (Next 7 Days & Monthly) =================
+const ymdFromDate = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const addDaysYMD = (ymdStr, days) => {
+  const d = new Date(ymdStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return ymdFromDate(d);
+};
+
+function orderScheduleYMD(o) {
+  const raw = o.scheduled_at || o.arrival_at || o.created_at;
+  const d = pd(raw);
+  return d ? ymdFromDate(d) : '';
+}
+
+function orderScheduleTime(o) {
+  const d = pd(o.scheduled_at || o.arrival_at);
+  return d ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : 'Anytime';
+}
+
+function orderScheduleSortKey(o) {
+  const d = pd(o.scheduled_at || o.arrival_at || o.created_at);
+  return d ? d.getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+async function viewCalendar(q = {}) {
+  const mode = q.mode === 'month' ? 'month' : '7d';
+  const todayStr = today();
+  const baseDate = /^\d{4}-\d{2}-\d{2}$/.test(q.date || '') ? q.date : todayStr;
+  const mineOnly = !can('orders', 1);
+
+  const [ordersRaw, clients, techs] = await Promise.all([
+    api('GET', '/api/orders?' + (mineOnly ? 'mine=1' : '')),
+    can('clients') ? load('clients', true).catch(() => []) : Promise.resolve([]),
+    can('orders') ? api('GET', '/api/technicians').catch(() => []) : Promise.resolve([]),
+  ]);
+
+  const fType = q.type || '';
+  const fTech = q.technician_id || '';
+  const fClient = q.client_id || '';
+  const fStatus = q.status || '';
+  const fOff = q.off_hours || '';
+
+  const filtered = ordersRaw.filter(o => {
+    if (o.status === 'cancelada' && fStatus !== 'cancelada') return false;
+    if (fType && o.type !== fType) return false;
+    if (fTech && String(o.technician_id || '') !== String(fTech)) return false;
+    if (fClient && String(o.client_id || '') !== String(fClient)) return false;
+    if (fStatus && o.status !== fStatus) return false;
+    if (fOff === '1' && !o.off_hours) return false;
+    if (fOff === '0' && o.off_hours) return false;
+    return !!orderScheduleYMD(o);
+  });
+
+  const byDay = new Map();
+  filtered.forEach(o => {
+    const k = orderScheduleYMD(o);
+    if (!k) return;
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(o);
+  });
+  byDay.forEach(arr => arr.sort((a, b) => orderScheduleSortKey(a) - orderScheduleSortKey(b)));
+
+  const buildCalUrl = (overrides = {}) => {
+    const params = {
+      mode: overrides.mode ?? mode,
+      date: overrides.date ?? baseDate,
+      type: overrides.type ?? fType,
+      technician_id: overrides.technician_id ?? fTech,
+      client_id: overrides.client_id ?? fClient,
+      status: overrides.status ?? fStatus,
+      off_hours: overrides.off_hours ?? fOff,
+    };
+    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null)).toString();
+    return '#/calendario' + (qs ? '?' + qs : '');
+  };
+
+  const renderEventCard = o => {
+    const eq = [o.eq_location, o.eq_brand].filter(Boolean).join(' · ');
+    const cardCls = o.priority === 'urgente' ? 'pr-urgente-card' : `t-${o.type}`;
+    return `<div class="cal-ev ${cardCls}" data-id="${o.id}">
+      <div class="cal-ev-time">
+        <span>${esc(orderScheduleTime(o))} · ${esc(TYPE[o.type] || o.type)}</span>
+        ${o.off_hours ? '<span>🌙</span>' : ''}
+      </div>
+      <div class="cal-ev-client">${esc(o.client_name)}</div>
+      <div class="cal-ev-meta">${esc(o.technician_name || 'Unassigned')}${eq ? ' · ' + esc(eq) : ''}</div>
+      <div style="margin-top:5px">${badgeSt(o.status)} ${['alta', 'urgente'].includes(o.priority) ? badgePr(o.priority) : ''}</div>
+    </div>`;
+  };
+
+  let rangeLabel = '';
+  let prevDate = '';
+  let nextDate = '';
+  let bodyHtml = '';
+
+  if (mode === '7d') {
+    const days = Array.from({ length: 7 }, (_, i) => addDaysYMD(baseDate, i));
+    rangeLabel = `${fmtYMD(days[0])} — ${fmtYMD(days[6])}`;
+    prevDate = addDaysYMD(baseDate, -7);
+    nextDate = addDaysYMD(baseDate, 7);
+
+    bodyHtml = `<div class="card tbl-wrap"><div class="cal-7grid">${days.map(dStr => {
+      const dt = new Date(dStr + 'T12:00:00');
+      const dow = dt.toLocaleDateString('en-US', { weekday: 'short' });
+      const dnum = dt.getDate();
+      const isTod = dStr === todayStr;
+      const isWknd = dt.getDay() === 0 || dt.getDay() === 6;
+      const list = byDay.get(dStr) || [];
+      return `<div class="cal-day ${isTod ? 'today' : ''} ${isWknd ? 'offday' : ''}">
+        <div class="cal-day-head">
+          <div><div class="dow">${esc(dow)}</div><div class="small muted">${dt.toLocaleDateString('en-US', { month: 'short' })}</div></div>
+          <span class="dnum">${dnum}</span>
+        </div>
+        <div class="cal-events">
+          ${list.length ? list.map(renderEventCard).join('') : '<div class="cal-empty-day">No visits scheduled</div>'}
+        </div>
+      </div>`;
+    }).join('')}</div></div>`;
+  } else {
+    const refDt = new Date(baseDate + 'T12:00:00');
+    const year = refDt.getFullYear();
+    const monthIdx = refDt.getMonth();
+    const firstOfMonth = new Date(year, monthIdx, 1, 12, 0, 0);
+    const lastOfMonth = new Date(year, monthIdx + 1, 0, 12, 0, 0);
+    rangeLabel = firstOfMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    prevDate = ymdFromDate(new Date(year, monthIdx - 1, 1, 12, 0, 0));
+    nextDate = ymdFromDate(new Date(year, monthIdx + 1, 1, 12, 0, 0));
+
+    const startOffset = firstOfMonth.getDay(); // 0=Sun..6=Sat
+    const gridStart = new Date(year, monthIdx, 1 - startOffset, 12, 0, 0);
+    const totalCells = Math.ceil((startOffset + lastOfMonth.getDate()) / 7) * 7;
+    const cells = Array.from({ length: totalCells }, (_, i) => {
+      const d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i, 12, 0, 0);
+      return { str: ymdFromDate(d), day: d.getDate(), inMonth: d.getMonth() === monthIdx };
+    });
+
+    const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    bodyHtml = `<div class="card tbl-wrap"><div class="cal-month-grid">
+      ${dows.map(w => `<div class="cal-m-dow">${w}</div>`).join('')}
+      ${cells.map(c => {
+        const list = byDay.get(c.str) || [];
+        return `<div class="cal-m-cell ${c.inMonth ? '' : 'outside'} ${c.str === todayStr ? 'today' : ''}">
+          <div class="cal-m-top"><span>${c.day}</span>${list.length ? `<span class="small muted">${list.length}</span>` : ''}</div>
+          ${list.slice(0, 4).map(o => `<button type="button" class="cal-m-pill t-${o.type}" data-id="${o.id}" title="${esc(`${orderScheduleTime(o)} · ${o.client_name} · ${o.technician_name || 'Unassigned'}`)}">${esc(`${orderScheduleTime(o)} ${o.client_name}`)}</button>`).join('')}
+          ${list.length > 4 ? `<div class="small muted">+${list.length - 4} more</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div></div>`;
+  }
+
+  const opt = (arr, sel) => arr.map(([v, t]) => `<option value="${esc(v)}" ${String(v) === String(sel ?? '') ? 'selected' : ''}>${esc(t)}</option>`).join('');
+
+  app.innerHTML = `
+    <div class="cal-toolbar">
+      <h1>Schedule Calendar</h1>
+      <div class="row">
+        <div class="tabs" style="margin:0">
+          <button type="button" class="${mode === '7d' ? 'on' : ''}" id="bMode7d">Next 7 Days</button>
+          <button type="button" class="${mode === 'month' ? 'on' : ''}" id="bModeMonth">Monthly</button>
+        </div>
+        ${fullOrders() ? '<button type="button" class="btn pri btn-sm" id="bCalNew">+ New order</button>' : ''}
+      </div>
+    </div>
+
+    <div class="card" style="padding:12px 16px;margin-bottom:14px">
+      <div class="row between" style="margin-bottom:10px">
+        <div class="row" style="gap:6px">
+          <button type="button" class="btn sm" id="bCalPrev">← Prev</button>
+          <button type="button" class="btn sm" id="bCalToday">Today</button>
+          <button type="button" class="btn sm" id="bCalNext">Next →</button>
+        </div>
+        <b style="color:var(--navy)">${esc(rangeLabel)}</b>
+      </div>
+      <div class="cal-filters" id="calFilterBar" style="margin-bottom:0">
+        <select id="cfType">${opt([['', 'All visit types'], ['preventivo', 'Preventive'], ['correctivo', 'Corrective']], fType)}</select>
+        ${techs.length ? `<select id="cfTech">${opt([['', 'All technicians'], ...techs.map(u => [u.id, u.name])], fTech)}</select>` : ''}
+        ${clients.length ? `<select id="cfClient">${opt([['', 'All clients'], ...clients.map(c => [c.id, c.name])], fClient)}</select>` : ''}
+        <select id="cfStatus">${opt([['', 'Active statuses'], ['pendiente', 'Pending'], ['asignada', 'Assigned'], ['en_progreso', 'On site'], ['completada', 'Completed']], fStatus)}</select>
+        <select id="cfOff">${opt([['', 'Regular & Off Hours'], ['1', '🌙 Off Hours only'], ['0', 'Regular hours only']], fOff)}</select>
+      </div>
+    </div>
+
+    ${bodyHtml}
+  `;
+
+  $('#bMode7d').onclick = () => { location.hash = buildCalUrl({ mode: '7d', date: todayStr }); };
+  $('#bModeMonth').onclick = () => { location.hash = buildCalUrl({ mode: 'month', date: todayStr }); };
+  $('#bCalPrev').onclick = () => { location.hash = buildCalUrl({ date: prevDate }); };
+  $('#bCalToday').onclick = () => { location.hash = buildCalUrl({ date: todayStr }); };
+  $('#bCalNext').onclick = () => { location.hash = buildCalUrl({ date: nextDate }); };
+  $('#bCalNew') && ($('#bCalNew').onclick = run(() => editOrderModal(null)));
+
+  const onFilterChange = () => {
+    location.hash = buildCalUrl({
+      type: $('#cfType')?.value || '',
+      technician_id: $('#cfTech')?.value || '',
+      client_id: $('#cfClient')?.value || '',
+      status: $('#cfStatus')?.value || '',
+      off_hours: $('#cfOff')?.value || '',
+    });
+  };
+  ['#cfType', '#cfTech', '#cfClient', '#cfStatus', '#cfOff'].forEach(s => $(s)?.addEventListener('change', onFilterChange));
+
   bindOrderCards();
 }
 
